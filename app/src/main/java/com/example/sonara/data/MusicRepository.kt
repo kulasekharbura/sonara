@@ -23,6 +23,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.stream.DeliveryMethod
+import org.schabi.newpipe.extractor.stream.StreamInfo
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -101,88 +104,43 @@ class MusicRepository(private val context: Context) {
     }
 
     /**
-     * UNIFIED EXTRACTION PROTOCOL:
-     * Attempts native device-level extraction via internal client API endpoints.
-     * Integrates automatic multi-engine fallbacks to clear datacenter/residential blocks seamlessly.
+     * UNIFIED EXTRACTION PROTOCOL.
+     *
+     * PRIMARY path uses NewPipeExtractor. This is the important bit: YouTube/YouTube Music stream
+     * URLs are protected by a signature cipher and the `n` throttling parameter, both of which must
+     * be solved by executing YouTube's player JavaScript. NewPipe does exactly that for us, so the
+     * URL it returns is fully deciphered and plays at full speed in ExoPlayer. This is the same
+     * approach SimpMusic/InnerTune rely on, and replaces the old hand-rolled youtubei POST that
+     * returned throttled or 403'd URLs.
+     *
+     * The cobalt.tools mirrors and the Render backend remain only as last-resort fallbacks.
      */
     suspend fun fetchAudioStreamLink(videoId: String): String = withContext(Dispatchers.IO) {
         var directUrl = ""
 
-        // --- CORE LOGIC: INTERNAL INNER-TUNE FOOTPRINT WITH SIGNED VISITOR METRICS ---
+        // --- PRIMARY: NewPipeExtractor (deciphers signature + n parameter) ---
         try {
-            val targetUrl = "https://music.youtube.com/youtubei/v1/player"
-            val url = URL(targetUrl)
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.setRequestProperty("User-Agent", "com.google.android.apps.youtube.music/6.45.52 (Linux; U; Android 14; en_US)")
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+            val streamInfo = StreamInfo.getInfo(ServiceList.YouTube, watchUrl)
 
-            // CRITICAL HEADER SIGNATURES REQUIRED BY YOUTUBEI PLATFORMS
-            connection.setRequestProperty("X-Goog-Api-Format-Version", "2")
-            connection.connectTimeout = 4000
-            connection.readTimeout = 4000
-            connection.doOutput = true
+            // Keep only progressive HTTP audio URLs (directly playable by ExoPlayer), then pick the
+            // highest bitrate one. DASH-only entries are skipped because they are manifests, not
+            // ready-to-stream URLs.
+            val bestAudio = streamInfo.audioStreams
+                .filter { it.isUrl && it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP }
+                .maxByOrNull { it.averageBitrate }
 
-            // Enhanced context object containing validation structures
-            val jsonPayload = """
-                {
-                  "videoId": "$videoId",
-                  "context": {
-                    "client": {
-                      "clientName": "ANDROID_MUSIC",
-                      "clientVersion": "6.45.52",
-                      "hl": "en",
-                      "gl": "US",
-                      "osName": "Android",
-                      "osVersion": "14",
-                      "androidSdkVersion": 34,
-                      "visitorData": "Cgt2cWc4N2p0bk1xaykpeeCg"
-                    },
-                    "user": {
-                      "lockedSafetyMode": false
-                    }
-                  },
-                  "playbackContext": {
-                    "contentPlaybackContext": {
-                      "signatureTimestamp": 20000 
-                    }
-                  }
-                }
-            """.trimIndent()
-
-            connection.outputStream.use { os ->
-                os.write(jsonPayload.toByteArray(charset("utf-8")))
-            }
-
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                val responseText = connection.inputStream.bufferedReader().use { it.readText() }
-                val jsonResponse = JSONObject(responseText)
-
-                if (jsonResponse.has("streamingData")) {
-                    val streamingData = jsonResponse.getJSONObject("streamingData")
-                    if (streamingData.has("adaptiveFormats")) {
-                        val adaptiveFormats = streamingData.getJSONArray("adaptiveFormats")
-                        var highestBitrate = 0
-
-                        for (i in 0 until adaptiveFormats.length()) {
-                            val format = adaptiveFormats.getJSONObject(i)
-                            val mimeType = format.optString("mimeType", "")
-
-                            if (mimeType.contains("audio/")) {
-                                val bitrate = format.optInt("bitrate", 0)
-                                val streamUrl = format.optString("url", "")
-
-                                if (streamUrl.isNotEmpty() && bitrate > highestBitrate) {
-                                    highestBitrate = bitrate
-                                    directUrl = streamUrl
-                                }
-                            }
-                        }
-                    }
-                }
+            val resolved = bestAudio?.content
+            if (!resolved.isNullOrEmpty()) {
+                directUrl = resolved
+                android.util.Log.d(
+                    "SONARA_CORE",
+                    "NewPipe resolved audio stream (${bestAudio.averageBitrate} bps, " +
+                        "${bestAudio.format?.name ?: "unknown"})."
+                )
             }
         } catch (e: Exception) {
-            android.util.Log.e("SONARA_CORE", "Native internal pipeline exception occurred.", e)
+            android.util.Log.e("SONARA_CORE", "NewPipe extraction failed for $videoId.", e)
         }
 
         // --- SECONDARY ENGINE FAILOVER: ENHANCED COBALT CLOAKED PAYLOADS ---

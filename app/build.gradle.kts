@@ -27,6 +27,7 @@ android {
         }
     }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
@@ -73,6 +74,9 @@ dependencies {
 
     // --- FIXED: Switched "teamNewPipe" to strictly lowercase "teamnewpipe" ---
     implementation("com.github.teamnewpipe:NewPipeExtractor:v0.24.4")
+
+    // Required so NewPipeExtractor's use of java.time works on minSdk 24 (java.time is API 26+).
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
     // --- CRITICAL ADDITION: Native JSON Engine footprint for MusicRepository parsing logic ---
     implementation("org.json:json:20240303")
