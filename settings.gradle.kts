@@ -19,6 +19,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+
+        // --- FIXED: Added JitPack Repository to resolve TeamNewPipe references ---
+        maven { url = java.net.URI("https://jitpack.io") }
     }
 }
 
