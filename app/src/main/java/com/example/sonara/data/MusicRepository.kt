@@ -12,8 +12,13 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.example.sonara.playback.PlaybackService
+import com.example.sonara.network.InnerTubeClient
+import com.example.sonara.network.PipedClient
 import com.example.sonara.network.RetrofitClient
 import com.example.sonara.network.InvidiousSearchItem
+import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.stream.DeliveryMethod
+import org.schabi.newpipe.extractor.stream.StreamInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -22,12 +27,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import org.schabi.newpipe.extractor.ServiceList
-import org.schabi.newpipe.extractor.stream.DeliveryMethod
-import org.schabi.newpipe.extractor.stream.StreamInfo
-import java.net.HttpURLConnection
-import java.net.URL
 
 class MusicRepository(private val context: Context) {
 
@@ -47,6 +46,17 @@ class MusicRepository(private val context: Context) {
     val duration: StateFlow<Long> = _duration.asStateFlow()
 
     private val repositoryScope = CoroutineScope(Dispatchers.Main)
+
+    private val pipedInstances = listOf(
+        "https://pipedapi.kavin.rocks/",
+        "https://pipedapi.leptons.xyz/",
+        "https://pipedapi.nosebs.ru/",
+        "https://pipedapi-libre.kavin.rocks/",
+        "https://piped-api.privacy.com.de/",
+        "https://pipedapi.adminforge.de/",
+        "https://api.piped.yt/",
+        "https://pipedapi.drgns.space/"
+    )
 
     init {
         initializeController()
@@ -104,101 +114,83 @@ class MusicRepository(private val context: Context) {
     }
 
     /**
-     * UNIFIED EXTRACTION PROTOCOL.
+     * Piped-first stream resolution with NewPipeExtractor fallback.
      *
-     * PRIMARY path uses NewPipeExtractor. This is the important bit: YouTube/YouTube Music stream
-     * URLs are protected by a signature cipher and the `n` throttling parameter, both of which must
-     * be solved by executing YouTube's player JavaScript. NewPipe does exactly that for us, so the
-     * URL it returns is fully deciphered and plays at full speed in ExoPlayer. This is the same
-     * approach SimpMusic/InnerTune rely on, and replaces the old hand-rolled youtubei POST that
-     * returned throttled or 403'd URLs.
+     * Iterates through public Piped API instances to fetch a ready-to-play audio stream URL.
+     * Each instance is tried in order; on success the best audio stream is selected via
+     * AudioStreamSelector. On failure (network error, empty streams), the next instance is tried.
      *
-     * The cobalt.tools mirrors and the Render backend remain only as last-resort fallbacks.
+     * If all Piped instances fail, NewPipeExtractor is used as a last-resort fallback.
+     * If all methods fail, returns empty string. Never throws exceptions to the caller.
      */
     suspend fun fetchAudioStreamLink(videoId: String): String = withContext(Dispatchers.IO) {
-        var directUrl = ""
-
-        // --- PRIMARY: NewPipeExtractor (deciphers signature + n parameter) ---
         try {
-            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-            val streamInfo = StreamInfo.getInfo(ServiceList.YouTube, watchUrl)
-
-            // Keep only progressive HTTP audio URLs (directly playable by ExoPlayer), then pick the
-            // highest bitrate one. DASH-only entries are skipped because they are manifests, not
-            // ready-to-stream URLs.
-            val bestAudio = streamInfo.audioStreams
-                .filter { it.isUrl && it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP }
-                .maxByOrNull { it.averageBitrate }
-
-            val resolved = bestAudio?.content
-            if (!resolved.isNullOrEmpty()) {
-                directUrl = resolved
-                android.util.Log.d(
-                    "SONARA_CORE",
-                    "NewPipe resolved audio stream (${bestAudio.averageBitrate} bps, " +
-                        "${bestAudio.format?.name ?: "unknown"})."
-                )
+            // Phase 0: YouTube Inner Tube API (most reliable - direct from YouTube)
+            android.util.Log.d("SONARA_CORE", "Starting stream resolution for $videoId...")
+            android.util.Log.d("SONARA_CORE", "Auth status: isLoggedIn=${com.example.sonara.auth.YouTubeAuthManager.isLoggedIn()}, cookieLength=${com.example.sonara.auth.YouTubeAuthManager.getCookies().length}")
+            try {
+                val innerTubeUrl = InnerTubeClient.getStreamUrl(videoId)
+                if (!innerTubeUrl.isNullOrEmpty()) {
+                    android.util.Log.d("SONARA_CORE", "InnerTube resolved audio stream for $videoId (url length=${innerTubeUrl.length}).")
+                    return@withContext innerTubeUrl
+                } else {
+                    android.util.Log.w("SONARA_CORE", "InnerTube returned null/empty for $videoId. Trying Piped...")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("SONARA_CORE", "InnerTube failed for $videoId: ${e.message}")
             }
-        } catch (e: Exception) {
-            android.util.Log.e("SONARA_CORE", "NewPipe extraction failed for $videoId.", e)
-        }
 
-        // --- SECONDARY ENGINE FAILOVER: ENHANCED COBALT CLOAKED PAYLOADS ---
-        if (directUrl.isEmpty()) {
-            android.util.Log.w("SONARA_CORE", "Native parser failed or throttled. Engaging secondary network mirror pipeline...")
-            val backupGateways = listOf("https://api.cobalt.tools/api/json", "https://co.wuk.sh/api/json")
-            val cleanUrl = "https://www.youtube.com/watch?v=$videoId"
-
-            for (gateway in backupGateways) {
+            // Phase 1: Try all Piped instances
+            for (instance in pipedInstances) {
                 try {
-                    val url = URL(gateway)
-                    val connection = url.openConnection() as HttpURLConnection
-                    connection.requestMethod = "POST"
-                    connection.setRequestProperty("Content-Type", "application/json")
-                    connection.setRequestProperty("Accept", "application/json")
+                    val service = PipedClient.createService(instance)
+                    val response = service.getStreams(videoId)
+                    val bestStream = AudioStreamSelector.selectBest(response.audioStreams)
 
-                    // Cloaking headers to emulate browser security boundaries
-                    connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                    connection.setRequestProperty("Origin", "https://cobalt.tools")
-                    connection.setRequestProperty("Referer", "https://cobalt.tools/")
-                    connection.connectTimeout = 4000
-                    connection.readTimeout = 4000
-                    connection.doOutput = true
-
-                    // Modern Cobalt API signature structure
-                    val payload = JSONObject().apply {
-                        put("url", cleanUrl)
-                        put("downloadMode", "audio")
-                        put("audioFormat", "mp3")
-                        put("audioBitrate", "128")
+                    if (bestStream != null) {
+                        android.util.Log.d(
+                            "SONARA_CORE",
+                            "Piped resolved audio stream from $instance " +
+                                "(${bestStream.bitrate} bps, ${bestStream.codec ?: "unknown"})."
+                        )
+                        return@withContext bestStream.url
+                    } else {
+                        android.util.Log.w(
+                            "SONARA_CORE",
+                            "Piped instance $instance returned no valid audio streams for $videoId."
+                        )
                     }
-
-                    connection.outputStream.use { os ->
-                        os.write(payload.toString().toByteArray(Charsets.UTF_8))
-                    }
-
-                    if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                        val responseText = connection.inputStream.bufferedReader().use { it.readText() }
-                        val resolvedUrl = JSONObject(responseText).optString("url")
-                        if (resolvedUrl.isNotEmpty()) {
-                            directUrl = resolvedUrl
-                            break
-                        }
-                    }
-                } catch (err: Exception) {
-                    android.util.Log.w("SONARA_CORE", "Gateway mirror exception layout: ${err.message}")
+                } catch (e: Exception) {
+                    android.util.Log.w(
+                        "SONARA_CORE",
+                        "Piped instance $instance failed for $videoId: ${e.message}"
+                    )
                 }
             }
-        }
 
-        // --- ULTIMATE RESILIENT SAFEGUARD ---
-        if (directUrl.isEmpty()) {
-            android.util.Log.w("SONARA_CORE", "Network gateways saturated. Defaulting to private Render stream link layout container.")
-            directUrl = "https://sonara-backend-0zx5.onrender.com/api/stream?id=$videoId"
-        }
+            // Phase 2: NewPipeExtractor fallback
+            try {
+                val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+                val streamInfo = StreamInfo.getInfo(ServiceList.YouTube, watchUrl)
+                val bestAudio = streamInfo.audioStreams
+                    .filter { it.isUrl && it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP }
+                    .maxByOrNull { it.averageBitrate }
+                val resolved = bestAudio?.content
+                if (!resolved.isNullOrEmpty()) {
+                    android.util.Log.d("SONARA_CORE", "NewPipe resolved audio stream (${bestAudio.averageBitrate} bps).")
+                    return@withContext resolved
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SONARA_CORE", "NewPipe fallback failed for $videoId: ${e.message}")
+            }
 
-        android.util.Log.d("SONARA_CORE", "Handing final validated stream asset URL down to ExoPlayer channel: $directUrl")
-        directUrl
+            // All methods failed
+            android.util.Log.e("SONARA_CORE", "All stream resolution methods failed for $videoId.")
+            ""
+        } catch (e: Exception) {
+            android.util.Log.e("SONARA_CORE", "Unexpected error in fetchAudioStreamLink for $videoId: ${e.message}")
+            ""
+        }
     }
 
     fun playPause() {

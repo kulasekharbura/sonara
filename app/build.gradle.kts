@@ -72,12 +72,12 @@ dependencies {
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     implementation("io.coil-kt:coil-compose:2.6.0") // Jetpack Compose async image loading library
 
-    // --- FIXED: Switched "teamNewPipe" to strictly lowercase "teamnewpipe" ---
-    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.24.4")
+    // --- NewPipeExtractor: v0.26.3 (latest, released June 2026)
+    // Includes SABR workaround and signature deobfuscation fixes ---
+    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.3")
 
     // Required so NewPipeExtractor's use of java.time works on minSdk 24 (java.time is API 26+).
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
-    // --- CRITICAL ADDITION: Native JSON Engine footprint for MusicRepository parsing logic ---
-    implementation("org.json:json:20240303")
+
 }

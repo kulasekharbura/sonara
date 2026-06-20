@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
@@ -27,6 +28,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -61,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.sonara.auth.YouTubeAuthManager
 import com.example.sonara.ui.theme.SpotifyGreen
 import com.example.sonara.ui.theme.SpotifyLightGray
 import kotlinx.coroutines.delay
@@ -134,7 +138,7 @@ fun MainScreen(viewModel: PlaybackViewModel) {
                 Screen.Home -> Text("Spotify Style Home Screen Coming Soon", color = Color.White)
                 Screen.Search -> SearchTabContent(viewModel)
                 Screen.Library -> Text("Your Saved Playlists & Downloads", color = Color.White)
-                Screen.Profile -> Text("Two-User Private Account Settings", color = Color.White)
+                Screen.Profile -> ProfileTabContent()
             }
         }
 
@@ -477,6 +481,102 @@ fun PlaybackSliderComponent(viewModel: PlaybackViewModel) {
                 color = SpotifyLightGray,
                 style = MaterialTheme.typography.bodySmall
             )
+        }
+    }
+}
+
+@Composable
+fun ProfileTabContent() {
+    var showLogin by remember { mutableStateOf(false) }
+    var isLoggedIn by remember { mutableStateOf(YouTubeAuthManager.isLoggedIn()) }
+
+    if (showLogin) {
+        LoginScreen(
+            onLoginComplete = {
+                isLoggedIn = true
+                showLogin = false
+            }
+        )
+    } else {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            if (isLoggedIn) {
+                Icon(
+                    imageVector = Icons.Default.Person,
+                    contentDescription = "Signed in",
+                    tint = SpotifyGreen,
+                    modifier = Modifier.size(64.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Signed in to YouTube",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Authenticated playback is active",
+                    color = SpotifyLightGray,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(32.dp))
+                Button(
+                    onClick = {
+                        YouTubeAuthManager.clearCookies()
+                        isLoggedIn = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF282828)
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ExitToApp,
+                        contentDescription = "Sign out",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "  Sign out",
+                        color = Color.White
+                    )
+                }
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Person,
+                    contentDescription = "Not signed in",
+                    tint = SpotifyLightGray,
+                    modifier = Modifier.size(64.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Sign in to YouTube",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Required for audio playback. YouTube now requires authentication for all clients.",
+                    color = SpotifyLightGray,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(32.dp))
+                Button(
+                    onClick = { showLogin = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyGreen
+                    )
+                ) {
+                    Text(
+                        text = "Sign in with Google",
+                        color = Color.Black
+                    )
+                }
+            }
         }
     }
 }

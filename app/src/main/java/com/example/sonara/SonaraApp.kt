@@ -1,6 +1,7 @@
 package com.example.sonara
 
 import android.app.Application
+import com.example.sonara.auth.YouTubeAuthManager
 import com.example.sonara.network.NewPipeDownloaderImpl
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.localization.Localization
@@ -16,6 +17,10 @@ class SonaraApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // Initialize YouTube authentication manager
+        YouTubeAuthManager.init(this)
+
         NewPipe.init(
             NewPipeDownloaderImpl.getInstance(),
             Localization("en", "US")
