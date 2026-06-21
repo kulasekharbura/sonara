@@ -1,5 +1,6 @@
 package com.example.sonara.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,19 +16,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,6 +50,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -59,15 +65,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.sonara.auth.YouTubeAuthManager
+import com.example.sonara.data.models.RepeatMode
+import com.example.sonara.network.YoutubeSearchItem
 import com.example.sonara.ui.theme.SpotifyGreen
 import com.example.sonara.ui.theme.SpotifyLightGray
-import kotlinx.coroutines.delay
 import java.util.Locale
 
 enum class Screen(val title: String, val icon: ImageVector) {
@@ -135,9 +143,9 @@ fun MainScreen(viewModel: PlaybackViewModel) {
             contentAlignment = Alignment.Center
         ) {
             when (currentScreen) {
-                Screen.Home -> Text("Spotify Style Home Screen Coming Soon", color = Color.White)
+                Screen.Home -> HomeScreen(viewModel)
                 Screen.Search -> SearchTabContent(viewModel)
-                Screen.Library -> Text("Your Saved Playlists & Downloads", color = Color.White)
+                Screen.Library -> LibraryScreen(viewModel)
                 Screen.Profile -> ProfileTabContent()
             }
         }
@@ -169,15 +177,15 @@ fun MainScreen(viewModel: PlaybackViewModel) {
 fun SearchTabContent(viewModel: PlaybackViewModel) {
     var searchQuery by remember { mutableStateOf("") }
     val searchResults by viewModel.searchResults.collectAsState()
+    val searchPlaylists by viewModel.searchPlaylists.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
+    val likedSongIds by viewModel.likedSongIds.collectAsState()
     val keyboardController = LocalSoftwareKeyboardController.current
+    var showAddToPlaylistFor by remember { mutableStateOf<YoutubeSearchItem?>(null) }
+    val context = LocalContext.current
 
     LaunchedEffect(searchQuery) {
-        val cleaned = searchQuery.trim()
-        if (cleaned.length >= 3) {
-            delay(400)
-            viewModel.performSearch(cleaned)
-        }
+        viewModel.performDebouncedSearch(searchQuery.trim())
     }
 
     Column(
@@ -236,7 +244,7 @@ fun SearchTabContent(viewModel: PlaybackViewModel) {
                         Text("Search Results", style = MaterialTheme.typography.titleMedium, color = Color.White)
                     }
 
-                    items(searchResults) { trackItem ->
+                    itemsIndexed(searchResults) { index, trackItem ->
                         val videoId = trackItem.id.videoId ?: ""
 
                         Row(
@@ -245,8 +253,6 @@ fun SearchTabContent(viewModel: PlaybackViewModel) {
                                 .padding(vertical = 4.dp)
                                 .clickable {
                                     keyboardController?.hide()
-                                    // FIXED: Parameter name changed from streamUrl to streamUrlOrId
-                                    // and tracks raw videoId directly down to the pipeline
                                     viewModel.playAudioStream(
                                         streamUrlOrId = videoId,
                                         title = trackItem.snippet.title,
@@ -282,6 +288,74 @@ fun SearchTabContent(viewModel: PlaybackViewModel) {
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+
+                            LikeButton(
+                                isLiked = likedSongIds.contains(videoId),
+                                onToggle = { viewModel.toggleLike(videoId, trackItem.snippet.title, trackItem.snippet.channelTitle, trackItem.snippet.thumbnails.high.url) }
+                            )
+
+                            IconButton(onClick = {
+                                viewModel.addToQueue(trackItem)
+                                Toast.makeText(context, "Added to queue", Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.AddCircleOutline,
+                                    contentDescription = "Add to queue",
+                                    tint = SpotifyLightGray,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            IconButton(onClick = { showAddToPlaylistFor = trackItem }) {
+                                Icon(
+                                    Icons.Default.PlaylistAdd,
+                                    contentDescription = "Add to Playlist",
+                                    tint = SpotifyLightGray,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Search Playlists section
+                    if (searchPlaylists.isNotEmpty()) {
+                        item {
+                            Spacer(Modifier.height(16.dp))
+                            Text("Playlists", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                        }
+                        items(searchPlaylists) { playlist ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .clickable { /* Browse playlist tracks - TBD */ },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AsyncImage(
+                                    model = playlist.thumbnailUrl,
+                                    contentDescription = "Playlist thumbnail",
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(Color.DarkGray),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
+                                    Text(
+                                        playlist.title,
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        playlist.channelName,
+                                        color = SpotifyLightGray,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
                         }
                     }
                 } else {
@@ -295,6 +369,55 @@ fun SearchTabContent(viewModel: PlaybackViewModel) {
                 }
             }
         }
+    }
+
+    // Add to Playlist dialog
+    showAddToPlaylistFor?.let { song ->
+        val playlists by viewModel.customPlaylists.collectAsState()
+        AlertDialog(
+            onDismissRequest = { showAddToPlaylistFor = null },
+            title = { Text("Add to Playlist", color = Color.White) },
+            text = {
+                Column {
+                    if (playlists.isEmpty()) {
+                        Text("No playlists yet. Create one first.", color = SpotifyLightGray)
+                    } else {
+                        playlists.forEach { playlist ->
+                            Text(
+                                text = playlist.name,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.addToPlaylist(
+                                            playlist.id,
+                                            song.id.videoId ?: "",
+                                            song.snippet.title,
+                                            song.snippet.channelTitle,
+                                            song.snippet.thumbnails.high.url
+                                        ) { added ->
+                                            if (added) {
+                                                Toast.makeText(context, "Added to ${playlist.name}", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Already in ${playlist.name}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                        showAddToPlaylistFor = null
+                                    }
+                                    .padding(vertical = 12.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showAddToPlaylistFor = null }) {
+                    Text("Cancel", color = SpotifyLightGray)
+                }
+            },
+            containerColor = Color(0xFF282828)
+        )
     }
 }
 
@@ -359,6 +482,12 @@ fun FullPlayerOverlay(
     onSkipNext: () -> Unit,
     onSkipPrevious: () -> Unit
 ) {
+    var showQueue by remember { mutableStateOf(false) }
+    var showAddToPlaylistOverlay by remember { mutableStateOf(false) }
+    val queueItems by viewModel.queueItems.collectAsState()
+    val currentQueueIndex by viewModel.currentQueueIndex.collectAsState()
+    val overlayContext = LocalContext.current
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -367,7 +496,26 @@ fun FullPlayerOverlay(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        Spacer(modifier = Modifier.height(8.dp))
+        if (showQueue) {
+            QueueView(
+                queueItems = queueItems,
+                currentIndex = currentQueueIndex,
+                onDismiss = { showQueue = false },
+                onMoveItem = { from, to -> viewModel.moveQueueItem(from, to) }
+            )
+        } else {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            IconButton(onClick = { showQueue = true }) {
+                Icon(
+                    Icons.AutoMirrored.Filled.QueueMusic,
+                    contentDescription = "Queue",
+                    tint = Color.White
+                )
+            }
+        }
 
         AsyncImage(
             model = thumbnailUrl,
@@ -380,34 +528,61 @@ fun FullPlayerOverlay(
             contentScale = ContentScale.Crop
         )
 
-        Column(
+        Row(
             modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
-            horizontalAlignment = Alignment.Start
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineMedium,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+            Column(
+                modifier = Modifier.weight(1f),
+                horizontalAlignment = Alignment.Start
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = artist,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = SpotifyLightGray,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            val likedSongIds by viewModel.likedSongIds.collectAsState()
+            val currentVideoId = viewModel.currentMediaItem.collectAsState().value?.mediaId ?: ""
+            LikeButton(
+                isLiked = likedSongIds.contains(currentVideoId),
+                onToggle = { viewModel.toggleLike(currentVideoId, title, artist, thumbnailUrl ?: "") }
             )
-            Text(
-                text = artist,
-                style = MaterialTheme.typography.titleMedium,
-                color = SpotifyLightGray,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+
+            IconButton(onClick = { showAddToPlaylistOverlay = true }) {
+                Icon(
+                    Icons.Default.PlaylistAdd,
+                    contentDescription = "Add to Playlist",
+                    tint = SpotifyLightGray,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
         }
 
         PlaybackSliderComponent(viewModel = viewModel)
+
+        val repeatMode by viewModel.repeatMode.collectAsState()
+        val shuffleEnabled by viewModel.shuffleEnabled.collectAsState()
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            RepeatButton(repeatMode = repeatMode, onToggle = { viewModel.toggleRepeatMode() })
+
             IconButton(onClick = onSkipPrevious, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.SkipPrevious, contentDescription = "Previous", tint = Color.White, modifier = Modifier.size(36.dp))
             }
@@ -431,9 +606,62 @@ fun FullPlayerOverlay(
             IconButton(onClick = onSkipNext, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(36.dp))
             }
+
+            ShuffleButton(shuffleEnabled = shuffleEnabled, onToggle = { viewModel.toggleShuffle() })
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+        } // end else
+    }
+
+    // Add to Playlist dialog in FullPlayerOverlay
+    if (showAddToPlaylistOverlay) {
+        val playlists by viewModel.customPlaylists.collectAsState()
+        val currentVideoId = viewModel.currentMediaItem.collectAsState().value?.mediaId ?: ""
+        AlertDialog(
+            onDismissRequest = { showAddToPlaylistOverlay = false },
+            title = { Text("Add to Playlist", color = Color.White) },
+            text = {
+                Column {
+                    if (playlists.isEmpty()) {
+                        Text("No playlists yet. Create one first.", color = SpotifyLightGray)
+                    } else {
+                        playlists.forEach { playlist ->
+                            Text(
+                                text = playlist.name,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.addToPlaylist(
+                                            playlist.id,
+                                            currentVideoId,
+                                            title,
+                                            artist,
+                                            thumbnailUrl ?: ""
+                                        ) { added ->
+                                            if (added) {
+                                                Toast.makeText(overlayContext, "Added to ${playlist.name}", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(overlayContext, "Already in ${playlist.name}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                        showAddToPlaylistOverlay = false
+                                    }
+                                    .padding(vertical = 12.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showAddToPlaylistOverlay = false }) {
+                    Text("Cancel", color = SpotifyLightGray)
+                }
+            },
+            containerColor = Color(0xFF282828)
+        )
     }
 }
 

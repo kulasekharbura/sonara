@@ -39,6 +39,20 @@ data class ThumbnailGroup(
 data class ThumbDetails(
     val url: String
 )
+data class InvidiousPlaylistSearchItem(
+    val title: String,
+    val playlistId: String,
+    val author: String,
+    val playlistThumbnail: String? = null,
+    val videoCount: Int = 0,
+    val videos: List<InvidiousPlaylistVideo>? = null
+)
+
+data class InvidiousPlaylistVideo(
+    val title: String,
+    val videoId: String
+)
+
 data class InvidiousVideoDetails(
     val adaptiveFormats: List<InvidiousFormat>?
 )

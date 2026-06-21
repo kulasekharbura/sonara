@@ -11,4 +11,11 @@ interface YoutubeApiService {
         @Query("q") searchQuery: String,
         @Query("type") type: String = "video"
     ): List<InvidiousSearchItem>
+
+    @GET
+    suspend fun searchPlaylists(
+        @Url dynamicUrl: String,
+        @Query("q") searchQuery: String,
+        @Query("type") type: String = "playlist"
+    ): List<InvidiousPlaylistSearchItem>
 }
