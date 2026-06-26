@@ -8,18 +8,18 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface LikedSongDao {
-    @Query("SELECT * FROM liked_songs ORDER BY likedAt DESC")
-    fun getAllLikedSongs(): Flow<List<LikedSongEntity>>
+    @Query("SELECT * FROM liked_songs WHERE userId = :userId ORDER BY likedAt DESC")
+    fun getAllLikedSongs(userId: String): Flow<List<LikedSongEntity>>
 
-    @Query("SELECT videoId FROM liked_songs")
-    fun getAllLikedIds(): Flow<List<String>>
+    @Query("SELECT videoId FROM liked_songs WHERE userId = :userId")
+    fun getAllLikedIds(userId: String): Flow<List<String>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(song: LikedSongEntity)
 
-    @Query("DELETE FROM liked_songs WHERE videoId = :videoId")
-    suspend fun delete(videoId: String)
+    @Query("DELETE FROM liked_songs WHERE videoId = :videoId AND userId = :userId")
+    suspend fun delete(videoId: String, userId: String)
 
-    @Query("SELECT COUNT(*) FROM liked_songs")
-    fun getCount(): Flow<Int>
+    @Query("SELECT COUNT(*) FROM liked_songs WHERE userId = :userId")
+    fun getCount(userId: String): Flow<Int>
 }

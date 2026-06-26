@@ -9,5 +9,6 @@ data class RecentSongEntity(
     val title: String,
     val artist: String,
     val thumbnailUrl: String,
-    val playedAt: Long = System.currentTimeMillis()
+    val playedAt: Long = System.currentTimeMillis(),
+    val userId: String = ""
 )

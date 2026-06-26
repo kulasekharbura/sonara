@@ -9,5 +9,6 @@ data class LikedSongEntity(
     val title: String,
     val artist: String,
     val thumbnailUrl: String,
-    val likedAt: Long = System.currentTimeMillis()
+    val likedAt: Long = System.currentTimeMillis(),
+    val userId: String = ""
 )

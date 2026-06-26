@@ -4,63 +4,57 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.sonara.data.MusicRepository
-import com.example.sonara.data.db.LikedSongEntity
-import com.example.sonara.data.db.PlaylistEntity
-import com.example.sonara.data.db.PlaylistSongEntity
-import com.example.sonara.data.db.RecentSongEntity
-import com.example.sonara.data.db.SearchHistoryEntity
+import com.example.sonara.data.db.*
 import com.example.sonara.data.models.QueueTrack
 import com.example.sonara.data.models.RepeatMode
 import com.example.sonara.data.models.SearchPlaylistItem
-import com.example.sonara.network.YoutubeSearchItem
-import com.example.sonara.network.VideoIdId
-import com.example.sonara.network.SnippetData
-import com.example.sonara.network.ThumbnailGroup
-import com.example.sonara.network.ThumbDetails
+import com.example.sonara.network.*
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class PlaybackViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = MusicRepository(application)
+    private val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+
+    private val _userId = MutableStateFlow(auth.currentUser?.uid ?: "anonymous")
+    val userId: StateFlow<String> = _userId.asStateFlow()
 
     val isPlaying: StateFlow<Boolean> = repository.isPlaying
     val currentMediaItem: StateFlow<MediaItem?> = repository.currentMediaItem
-
     val currentPosition: StateFlow<Long> = repository.currentPosition
     val duration: StateFlow<Long> = repository.duration
 
-    // Queue & Modes
     val repeatMode: StateFlow<RepeatMode> = repository.repeatMode
     val shuffleEnabled: StateFlow<Boolean> = repository.shuffleEnabled
     val queueItems: StateFlow<List<QueueTrack>> = repository.queueItems
     val currentQueueIndex: StateFlow<Int> = repository.currentQueueIndex
-
-    // Library
     val likedSongIds: StateFlow<Set<String>> = repository.likedSongIds
 
-    private val _customPlaylists = MutableStateFlow<List<PlaylistEntity>>(emptyList())
-    val customPlaylists: StateFlow<List<PlaylistEntity>> = _customPlaylists.asStateFlow()
+    val customPlaylists: StateFlow<List<PlaylistEntity>> = userId.flatMapLatest {
+        repository.getAllPlaylists()
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    private val _recentSongs = MutableStateFlow<List<RecentSongEntity>>(emptyList())
-    val recentSongs: StateFlow<List<RecentSongEntity>> = _recentSongs.asStateFlow()
+    val recentSongs: StateFlow<List<RecentSongEntity>> = userId.flatMapLatest {
+        repository.getRecentSongs()
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    private val _recentSongsForHome = MutableStateFlow<List<RecentSongEntity>>(emptyList())
-    val recentSongsForHome: StateFlow<List<RecentSongEntity>> = _recentSongsForHome.asStateFlow()
+    val recentSongsForHome: StateFlow<List<RecentSongEntity>> = userId.flatMapLatest {
+        repository.getRecentSongsForHome()
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    private val _recentSearches = MutableStateFlow<List<SearchHistoryEntity>>(emptyList())
-    val recentSearches: StateFlow<List<SearchHistoryEntity>> = _recentSearches.asStateFlow()
+    val recentSearches: StateFlow<List<SearchHistoryEntity>> = userId.flatMapLatest {
+        repository.getRecentSearches()
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    // Search playlists
     private val _searchPlaylists = MutableStateFlow<List<SearchPlaylistItem>>(emptyList())
     val searchPlaylists: StateFlow<List<SearchPlaylistItem>> = _searchPlaylists.asStateFlow()
 
@@ -73,19 +67,13 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     private var searchJob: Job? = null
 
     init {
-        viewModelScope.launch {
-            repository.getAllPlaylists().collect { _customPlaylists.value = it }
+        auth.addAuthStateListener { firebaseAuth ->
+            val uid = firebaseAuth.currentUser?.uid ?: "anonymous"
+            if (_userId.value != uid) {
+                _userId.value = uid
+                repository.performCloudSync()
+            }
         }
-        viewModelScope.launch {
-            repository.getRecentSongs().collect { _recentSongs.value = it }
-        }
-        viewModelScope.launch {
-            repository.getRecentSongsForHome().collect { _recentSongsForHome.value = it }
-        }
-        viewModelScope.launch {
-            repository.getRecentSearches().collect { _recentSearches.value = it }
-        }
-        // Trigger initial cloud sync for authenticated users
         repository.performCloudSync()
     }
 
@@ -116,21 +104,18 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                 )
                 .build()
         }
-        repository.setQueue(mediaItems, startIndex)
+        if (mediaItems.isNotEmpty()) repository.setQueue(mediaItems, startIndex)
     }
 
-    fun toggleRepeatMode() {
-        val newMode = when (repeatMode.value) {
+    fun toggleRepeatMode() = repository.setRepeatMode(
+        when (repeatMode.value) {
             RepeatMode.OFF -> RepeatMode.ALL
             RepeatMode.ALL -> RepeatMode.ONE
             RepeatMode.ONE -> RepeatMode.OFF
         }
-        repository.setRepeatMode(newMode)
-    }
+    )
 
-    fun toggleShuffle() {
-        repository.setShuffleEnabled(!shuffleEnabled.value)
-    }
+    fun toggleShuffle() = repository.setShuffleEnabled(!shuffleEnabled.value)
 
     fun addToQueue(item: YoutubeSearchItem) {
         val mediaItem = MediaItem.Builder()
@@ -147,82 +132,78 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         repository.addToQueue(mediaItem)
     }
 
-    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
-        repository.moveQueueItem(fromIndex, toIndex)
+    fun addToQueue(videoId: String, title: String, artist: String, thumbnailUrl: String) {
+        val mediaItem = MediaItem.Builder()
+            .setMediaId(videoId)
+            .setUri("sonara://resolve/$videoId")
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(artist)
+                    .setArtworkUri(thumbnailUrl.toUri())
+                    .build()
+            )
+            .build()
+        repository.addToQueue(mediaItem)
     }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) = repository.moveQueueItem(fromIndex, toIndex)
 
     fun performDebouncedSearch(query: String) {
         searchJob?.cancel()
-
-        if (query.isEmpty()) {
-            _searchResults.value = emptyList()
-            _searchPlaylists.value = emptyList()
-            return
-        }
-
         if (query.length < 3) {
             _searchResults.value = emptyList()
             _searchPlaylists.value = emptyList()
+            _isSearching.value = false
             return
         }
 
         searchJob = viewModelScope.launch {
             delay(400)
             _isSearching.value = true
-            var searchSuccess = false
-
-            for (endpointUrl in invidiousInstances) {
+            // NOTE: Search history is NOT recorded here. It's recorded only when user
+            // actually interacts with a result (see playAudioStream, playQueueFromSearch).
+            
+            var success = false
+            for (instance in invidiousInstances) {
                 try {
-                    val fullSearchUrl = "${endpointUrl}search"
-
-                    // Fetch video results
-                    val results = repository.searchWithDynamicUrl(fullSearchUrl, query)
-
-                    if (results.isNotEmpty()) {
-                        val mappedResults = results.filter { !it.videoId.isNullOrEmpty() }.map { item ->
-                            val absoluteThumbnailUrl = "https://img.youtube.com/vi/${item.videoId}/hqdefault.jpg"
-
-                            YoutubeSearchItem(
-                                id = VideoIdId(videoId = item.videoId),
-                                snippet = SnippetData(
-                                    title = item.title,
-                                    channelTitle = item.author,
-                                    thumbnails = ThumbnailGroup(
-                                        default = ThumbDetails(url = absoluteThumbnailUrl),
-                                        high = ThumbDetails(url = absoluteThumbnailUrl)
-                                    )
+                    val searchUrl = "${instance}search"
+                    val results = repository.searchWithDynamicUrl(searchUrl, query)
+                    val playlists = repository.searchPlaylistsWithDynamicUrl(searchUrl, query)
+                    
+                    val mappedResults = results.filter { !it.videoId.isNullOrEmpty() }.map { item ->
+                        YoutubeSearchItem(
+                            id = VideoIdId(item.videoId),
+                            snippet = SnippetData(
+                                title = item.title,
+                                channelTitle = item.author,
+                                thumbnails = ThumbnailGroup(
+                                    default = ThumbDetails(item.videoThumbnails.firstOrNull()?.url ?: ""),
+                                    high = ThumbDetails(item.videoThumbnails.lastOrNull()?.url ?: "")
                                 )
                             )
-                        }
-
-                        _searchResults.value = mappedResults
-                        searchSuccess = true
-
-                        // Fetch playlist results (capped at 5)
-                        try {
-                            val playlistResults = repository.searchPlaylistsWithDynamicUrl(fullSearchUrl, query)
-                            _searchPlaylists.value = playlistResults.take(5).map { playlist ->
-                                SearchPlaylistItem(
-                                    playlistId = playlist.playlistId,
-                                    title = playlist.title,
-                                    channelName = playlist.author,
-                                    thumbnailUrl = playlist.playlistThumbnail ?: "",
-                                    videoCount = playlist.videoCount
-                                )
-                            }
-                        } catch (e: Exception) {
-                            _searchPlaylists.value = emptyList()
-                            e.printStackTrace()
-                        }
-
-                        break
+                        )
                     }
+
+                    val mappedPlaylists = playlists.map { item ->
+                        SearchPlaylistItem(
+                            playlistId = item.playlistId,
+                            title = item.title,
+                            channelName = item.author,
+                            thumbnailUrl = item.playlistThumbnail ?: "",
+                            videoCount = item.videoCount
+                        )
+                    }
+
+                    _searchResults.value = mappedResults
+                    _searchPlaylists.value = mappedPlaylists
+                    success = true
+                    break
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    android.util.Log.w("SONARA_SEARCH", "Instance $instance failed: ${e.message}")
                 }
             }
-
-            if (!searchSuccess) {
+            if (!success) {
                 _searchResults.value = emptyList()
                 _searchPlaylists.value = emptyList()
             }
@@ -230,76 +211,15 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun performSearch(query: String) {
-        if (query.isBlank()) return
-
-        viewModelScope.launch {
-            repository.recordSearch(query)
-            _isSearching.value = true
-            var searchSuccess = false
-
-            for (endpointUrl in invidiousInstances) {
-                try {
-                    val fullSearchUrl = "${endpointUrl}search"
-                    val results = repository.searchWithDynamicUrl(fullSearchUrl, query)
-
-                    if (results.isNotEmpty()) {
-                        val mappedResults = results.filter { !it.videoId.isNullOrEmpty() }.map { item ->
-                            val absoluteThumbnailUrl = "https://img.youtube.com/vi/${item.videoId}/hqdefault.jpg"
-
-                            YoutubeSearchItem(
-                                id = VideoIdId(videoId = item.videoId),
-                                snippet = SnippetData(
-                                    title = item.title,
-                                    channelTitle = item.author,
-                                    thumbnails = ThumbnailGroup(
-                                        default = ThumbDetails(url = absoluteThumbnailUrl),
-                                        high = ThumbDetails(url = absoluteThumbnailUrl)
-                                    )
-                                )
-                            )
-                        }
-
-                        _searchResults.value = mappedResults
-                        searchSuccess = true
-                        break
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            if (!searchSuccess) _searchResults.value = emptyList()
-            _isSearching.value = false
+    fun recordSearchQuery(query: String) {
+        if (query.length >= 3) {
+            viewModelScope.launch { repository.recordSearch(query) }
         }
     }
 
-    /**
-     * CLEANED UP PLAYBACK INITIATION:
-     * Parses the video ID safely and forwards it directly to the repository's native
-     * player pipeline layout without requesting third-party array lookups.
-     */
     fun playAudioStream(streamUrlOrId: String, title: String, artist: String, thumbnailUrl: String) {
-        try {
-            val videoId = if (streamUrlOrId.contains("v=")) {
-                streamUrlOrId.substringAfter("v=").substringBefore("&")
-            } else {
-                streamUrlOrId
-            }
-
-            // Directly invoking the repository. The repo handles background threading internally now!
-            repository.playStream(
-                videoId = videoId,
-                title = title,
-                artist = artist,
-                thumbnailUrl = thumbnailUrl
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        repository.playStream(streamUrlOrId, title, artist, thumbnailUrl)
     }
-
-    // --- Library Actions ---
 
     fun toggleLike(videoId: String, title: String, artist: String, thumbnailUrl: String) {
         viewModelScope.launch {
@@ -317,6 +237,18 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { repository.createPlaylist(name) }
     }
 
+    fun deletePlaylist(playlistId: Long) {
+        viewModelScope.launch { repository.deletePlaylist(playlistId) }
+    }
+
+    fun renamePlaylist(playlistId: Long, name: String) {
+        viewModelScope.launch { repository.renamePlaylist(playlistId, name) }
+    }
+
+    fun reorderPlaylistSongs(playlistId: Long, fromIndex: Int, toIndex: Int) {
+        viewModelScope.launch { repository.reorderPlaylistSongs(playlistId, fromIndex, toIndex) }
+    }
+
     fun addToPlaylist(playlistId: Long, videoId: String, title: String, artist: String, thumbnailUrl: String, onResult: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
             val added = repository.addSongToPlaylist(playlistId, videoId, title, artist, thumbnailUrl)
@@ -325,12 +257,162 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun getLikedSongs(): Flow<List<LikedSongEntity>> = repository.getLikedSongs()
-
     fun getPlaylistSongs(playlistId: Long): Flow<List<PlaylistSongEntity>> = repository.getPlaylistSongs(playlistId)
+    fun getPlaylist(playlistId: Long): Flow<PlaylistEntity?> = repository.getPlaylistById(playlistId)
 
-    fun performCloudSync() {
-        repository.performCloudSync()
+    fun removeSongFromPlaylist(playlistId: Long, videoId: String) {
+        viewModelScope.launch { repository.removeSongFromPlaylist(playlistId, videoId) }
     }
+
+    fun removeFromQueue(videoId: String) = repository.removeFromQueue(videoId)
+
+    val downloadedSongs: StateFlow<List<DownloadedSongEntity>> = userId.flatMapLatest {
+        repository.getAllDownloadedSongs()
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    fun isDownloaded(videoId: String): Flow<Boolean> = repository.isDownloaded(videoId)
+
+    private val _downloadProgress = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val downloadProgress: StateFlow<Map<String, Int>> = _downloadProgress.asStateFlow()
+
+    fun downloadSong(context: android.content.Context, videoId: String, title: String, artist: String, thumbnailUrl: String) {
+        viewModelScope.launch {
+            // Prevent duplicate downloads
+            val alreadyDownloaded = repository.isDownloaded(videoId).first()
+            if (alreadyDownloaded) {
+                android.widget.Toast.makeText(context, "Already downloaded", android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            // Also prevent re-triggering while download is in progress
+            if (_downloadProgress.value.containsKey(videoId)) {
+                android.widget.Toast.makeText(context, "Download already in progress", android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            val url = repository.fetchAudioStreamLink(videoId)
+            if (url.isNotEmpty()) {
+                val safeTitle = title.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Track" }
+                _downloadProgress.update { it + (videoId to 0) }
+                com.example.sonara.network.DownloadHelper.downloadWithStatus(
+                    context = context, url = url, title = title, artist = artist,
+                    thumbnailUrl = thumbnailUrl,
+                    onProgress = { progress ->
+                        _downloadProgress.update { it + (videoId to progress) }
+                        if (progress == 100) {
+                            viewModelScope.launch {
+                                repository.insertDownloadedSong(
+                                    DownloadedSongEntity(
+                                        videoId = videoId,
+                                        title = title,
+                                        artist = artist,
+                                        thumbnailUrl = thumbnailUrl,
+                                        localFilePath = "Sonara/$safeTitle.m4a",
+                                        userId = userId.value
+                                    )
+                                )
+                            }
+                        }
+                    }
+                )
+            } else {
+                android.util.Log.e("SONARA_DOWNLOAD", "Stream resolution failed for $videoId — cannot download")
+                android.widget.Toast.makeText(context, "Failed to resolve stream for download", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun downloadAll(context: android.content.Context, songs: List<com.example.sonara.ui.SongDisplayItem>) {
+        if (songs.isEmpty()) return
+        android.widget.Toast.makeText(context, "Downloading playlist (${songs.size} songs)", android.widget.Toast.LENGTH_SHORT).show()
+
+        // Launch each song download as a separate coroutine (all in parallel)
+        songs.forEach { song ->
+            viewModelScope.launch(Dispatchers.IO) {
+                val alreadyDownloaded = repository.isDownloaded(song.videoId).first()
+                if (alreadyDownloaded || _downloadProgress.value.containsKey(song.videoId)) return@launch
+
+                val url = repository.fetchAudioStreamLink(song.videoId)
+                if (url.isNotEmpty()) {
+                    val safeTitle = song.title.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Track" }
+                    _downloadProgress.update { it + (song.videoId to 0) }
+                    com.example.sonara.network.DownloadHelper.downloadWithStatus(
+                        context = context, url = url, title = song.title, artist = song.artist,
+                        thumbnailUrl = song.thumbnailUrl, showToasts = false,
+                        onProgress = { progress ->
+                            _downloadProgress.update { it + (song.videoId to progress) }
+                            if (progress == 100) {
+                                viewModelScope.launch {
+                                    repository.insertDownloadedSong(
+                                        DownloadedSongEntity(
+                                            videoId = song.videoId,
+                                            title = song.title,
+                                            artist = song.artist,
+                                            thumbnailUrl = song.thumbnailUrl,
+                                            localFilePath = "Sonara/$safeTitle.m4a",
+                                            userId = userId.value
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    fun deleteDownloadedSong(context: android.content.Context, videoId: String, title: String) {
+        viewModelScope.launch {
+            repository.deleteDownloadedSong(videoId)
+            com.example.sonara.network.DownloadHelper.removeDownload(context, title)
+            _downloadProgress.update { it - videoId }
+        }
+    }
+
+    fun syncDownloadsWithFolder(context: android.content.Context) {
+        viewModelScope.launch {
+            val dbSongs = repository.getAllDownloadedSongs().first()
+            
+            // Remove DB entries whose files no longer exist
+            dbSongs.forEach { song ->
+                if (!com.example.sonara.network.DownloadHelper.isFileDownloaded(song.title)) {
+                    repository.deleteDownloadedSong(song.videoId)
+                }
+            }
+
+            // Scan folder and add entries for files not in DB (after reinstall)
+            val sonaraDir = java.io.File(
+                android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                "Sonara"
+            )
+            if (sonaraDir.exists() && sonaraDir.isDirectory) {
+                // Refresh DB list after cleanup
+                val currentDbSongs = repository.getAllDownloadedSongs().first()
+                val trackedFiles = currentDbSongs.map { song ->
+                    song.title.filter { c -> c.isLetterOrDigit() || c == ' ' }.lowercase()
+                }.toSet()
+
+                sonaraDir.listFiles()?.filter { it.extension == "m4a" }?.forEach { file ->
+                    val fileTitle = file.nameWithoutExtension.lowercase()
+                    // Only add if NOT already tracked (compare sanitized lowercase names)
+                    if (fileTitle !in trackedFiles) {
+                        repository.insertDownloadedSong(
+                            com.example.sonara.data.db.DownloadedSongEntity(
+                                videoId = "local_${file.name.hashCode()}",
+                                title = file.nameWithoutExtension,
+                                artist = "Unknown",
+                                thumbnailUrl = "",
+                                localFilePath = "Sonara/${file.name}",
+                                userId = userId.value
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun performCloudSync() = repository.performCloudSync()
 
     fun playFromLikedSongs(startIndex: Int) {
         viewModelScope.launch {
@@ -379,6 +461,37 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                 MediaItem.Builder()
                     .setMediaId(song.videoId)
                     .setUri("sonara://resolve/${song.videoId}")
+                    .setMediaMetadata(
+                        MediaMetadata.Builder()
+                            .setTitle(song.title)
+                            .setArtist(song.artist)
+                            .setArtworkUri(song.thumbnailUrl.toUri())
+                            .build()
+                    )
+                    .build()
+            }
+            if (mediaItems.isNotEmpty()) repository.setQueue(mediaItems, startIndex)
+        }
+    }
+
+    fun playFromDownloads(startIndex: Int) {
+        viewModelScope.launch {
+            val downloads = repository.getAllDownloadedSongs().first()
+            val mediaItems = downloads.map { song ->
+                // Use local file path for downloaded songs — no streaming needed
+                val localFile = java.io.File(
+                    android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                    song.localFilePath
+                )
+                val uri = if (localFile.exists()) {
+                    localFile.toUri().toString()
+                } else {
+                    // Fallback to stream if file is missing
+                    "sonara://resolve/${song.videoId}"
+                }
+                MediaItem.Builder()
+                    .setMediaId(song.videoId)
+                    .setUri(uri)
                     .setMediaMetadata(
                         MediaMetadata.Builder()
                             .setTitle(song.title)

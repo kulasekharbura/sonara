@@ -1,5 +1,6 @@
 package com.example.sonara.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -16,9 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -53,25 +52,33 @@ import com.example.sonara.ui.theme.SpotifyLightGray
 private sealed class LibraryDetail {
     data object LikedSongs : LibraryDetail()
     data object RecentSongs : LibraryDetail()
+    data object Downloads : LibraryDetail()
     data class CustomPlaylist(val playlistId: Long) : LibraryDetail()
 }
 
 @Composable
-fun LibraryScreen(viewModel: PlaybackViewModel) {
+fun LibraryScreen(viewModel: PlaybackViewModel, onNavigateToSearch: () -> Unit) {
     val likedSongIds by viewModel.likedSongIds.collectAsState()
     val customPlaylists by viewModel.customPlaylists.collectAsState()
     val recentSongs by viewModel.recentSongs.collectAsState()
+    val downloadedSongs by viewModel.downloadedSongs.collectAsState()
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var selectedDetail by remember { mutableStateOf<LibraryDetail?>(null) }
 
     // If a detail view is selected, show PlaylistDetailScreen inline
+    // Handle back gesture for inline playlist detail
+    if (selectedDetail != null) {
+        BackHandler { selectedDetail = null }
+    }
+
     when (val detail = selectedDetail) {
         is LibraryDetail.LikedSongs -> {
             PlaylistDetailScreen(
                 viewModel = viewModel,
                 playlistType = "liked",
-                onBack = { selectedDetail = null }
+                onBack = { selectedDetail = null },
+                onNavigateToSearch = onNavigateToSearch
             )
             return
         }
@@ -79,7 +86,17 @@ fun LibraryScreen(viewModel: PlaybackViewModel) {
             PlaylistDetailScreen(
                 viewModel = viewModel,
                 playlistType = "recent",
-                onBack = { selectedDetail = null }
+                onBack = { selectedDetail = null },
+                onNavigateToSearch = onNavigateToSearch
+            )
+            return
+        }
+        is LibraryDetail.Downloads -> {
+            PlaylistDetailScreen(
+                viewModel = viewModel,
+                playlistType = "downloads",
+                onBack = { selectedDetail = null },
+                onNavigateToSearch = onNavigateToSearch
             )
             return
         }
@@ -88,7 +105,8 @@ fun LibraryScreen(viewModel: PlaybackViewModel) {
                 viewModel = viewModel,
                 playlistType = "custom",
                 playlistId = detail.playlistId,
-                onBack = { selectedDetail = null }
+                onBack = { selectedDetail = null },
+                onNavigateToSearch = onNavigateToSearch
             )
             return
         }
@@ -189,6 +207,17 @@ fun LibraryScreen(viewModel: PlaybackViewModel) {
                     title = "Recent Songs",
                     subtitle = "${recentSongs.size} songs",
                     onClick = { selectedDetail = LibraryDetail.RecentSongs }
+                )
+            }
+
+            // Downloads entry
+            item {
+                LibraryItemRow(
+                    icon = Icons.Default.ArrowCircleDown,
+                    iconTint = SpotifyGreen,
+                    title = "Downloads",
+                    subtitle = "${downloadedSongs.size} songs",
+                    onClick = { selectedDetail = LibraryDetail.Downloads }
                 )
             }
 

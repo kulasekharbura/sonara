@@ -11,9 +11,10 @@ import androidx.room.RoomDatabase
         PlaylistEntity::class,
         PlaylistSongEntity::class,
         RecentSongEntity::class,
-        SearchHistoryEntity::class
+        SearchHistoryEntity::class,
+        DownloadedSongEntity::class
     ],
-    version = 2,
+    version = 5,
     exportSchema = false
 )
 abstract class SonaraDatabase : RoomDatabase() {
@@ -22,6 +23,7 @@ abstract class SonaraDatabase : RoomDatabase() {
     abstract fun playlistDao(): PlaylistDao
     abstract fun recentSongDao(): RecentSongDao
     abstract fun searchHistoryDao(): SearchHistoryDao
+    abstract fun downloadedSongDao(): DownloadedSongDao
 
     companion object {
         @Volatile

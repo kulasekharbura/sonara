@@ -9,6 +9,7 @@ import androidx.annotation.OptIn
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.cache.CacheDataSource
@@ -19,12 +20,22 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import com.google.common.util.concurrent.ListenableFuture
 import java.io.File
 
 @OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
+
+    companion object {
+        const val ACTION_LIKE = "com.example.sonara.ACTION_LIKE"
+        /** Called by the notification like button. Set by MusicRepository. */
+        var likeCallback: ((videoId: String, title: String, artist: String, thumbnailUrl: String) -> Unit)? = null
+    }
 
     private var player: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
@@ -105,10 +116,56 @@ class PlaybackService : MediaSessionService() {
             .build().apply {
                 setAudioAttributes(audioAttributes, true)
                 playWhenReady = true
+                repeatMode = Player.REPEAT_MODE_ALL
             }
 
         mediaSession = player?.let { exoPlayer ->
-            MediaSession.Builder(this, exoPlayer).build()
+            MediaSession.Builder(this, exoPlayer)
+                .setCallback(object : MediaSession.Callback {
+                    override fun onCustomCommand(
+                        session: MediaSession,
+                        controller: MediaSession.ControllerInfo,
+                        customCommand: SessionCommand,
+                        args: android.os.Bundle
+                    ): ListenableFuture<SessionResult> {
+                        if (customCommand.customAction == ACTION_LIKE) {
+                            val item = session.player.currentMediaItem
+                            if (item != null) {
+                                val videoId = item.mediaId
+                                val title = item.mediaMetadata.title?.toString() ?: ""
+                                val artist = item.mediaMetadata.artist?.toString() ?: ""
+                                val thumbnail = item.mediaMetadata.artworkUri?.toString() ?: ""
+                                // Fire and forget - like the song
+                                likeCallback?.invoke(videoId, title, artist, thumbnail)
+                                android.util.Log.d("SONARA_SERVICE", "Like action from notification: $title")
+                            }
+                            return com.google.common.util.concurrent.Futures.immediateFuture(
+                                SessionResult(SessionResult.RESULT_SUCCESS)
+                            )
+                        }
+                        return super.onCustomCommand(session, controller, customCommand, args)
+                    }
+
+                    override fun onConnect(
+                        session: MediaSession,
+                        controller: MediaSession.ControllerInfo
+                    ): MediaSession.ConnectionResult {
+                        val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+                            .add(SessionCommand(ACTION_LIKE, android.os.Bundle.EMPTY))
+                            .build()
+                        return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                            .setAvailableSessionCommands(sessionCommands)
+                            .build()
+                    }
+                })
+                .setCustomLayout(listOf(
+                    CommandButton.Builder()
+                        .setDisplayName("Like")
+                        .setIconResId(android.R.drawable.btn_star_big_on)
+                        .setSessionCommand(SessionCommand(ACTION_LIKE, android.os.Bundle.EMPTY))
+                        .build()
+                ))
+                .build()
         }
     }
 

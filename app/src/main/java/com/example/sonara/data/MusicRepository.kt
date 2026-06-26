@@ -13,6 +13,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import com.example.sonara.data.db.*
 import com.google.common.util.concurrent.MoreExecutors
 import com.example.sonara.playback.PlaybackService
 import com.example.sonara.network.RetrofitClient
@@ -35,14 +36,19 @@ import com.example.sonara.data.db.SearchHistoryEntity
 import com.example.sonara.data.CloudSyncManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 class MusicRepository(private val context: Context) {
 
@@ -52,6 +58,10 @@ class MusicRepository(private val context: Context) {
     private val playlistDao: PlaylistDao = database.playlistDao()
     private val recentSongDao: RecentSongDao = database.recentSongDao()
     private val searchHistoryDao: SearchHistoryDao = database.searchHistoryDao()
+    private val downloadedSongDao: DownloadedSongDao = database.downloadedSongDao()
+
+    private val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
+    private fun getUserId(): String = auth.currentUser?.uid ?: "anonymous"
 
     private val syncManager = CloudSyncManager(database)
 
@@ -85,7 +95,8 @@ class MusicRepository(private val context: Context) {
     private val _likedSongIds = MutableStateFlow<Set<String>>(emptySet())
     val likedSongIds: StateFlow<Set<String>> = _likedSongIds.asStateFlow()
 
-    private val repositoryScope = CoroutineScope(Dispatchers.Main)
+    // SupervisorJob ensures that one background failure will NOT kill the scope for subsequent operations like cloud sync
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     /**
      * In-memory cache for resolved stream URLs.
@@ -98,10 +109,20 @@ class MusicRepository(private val context: Context) {
     init {
         initializeController()
         startProgressTicker()
-        // Collect liked song IDs from Room database
+        
+        // Reactively collect liked IDs whenever the user changes
         repositoryScope.launch {
-            likedSongDao.getAllLikedIds().collect { ids ->
-                _likedSongIds.value = ids.toSet()
+            callbackFlow {
+                val listener = com.google.firebase.auth.FirebaseAuth.AuthStateListener { 
+                    trySend(it.currentUser?.uid ?: "anonymous")
+                }
+                auth.addAuthStateListener(listener)
+                awaitClose { auth.removeAuthStateListener(listener) }
+            }.collectLatest { uid ->
+                // Flow of Flow: collect the inner flow from Room
+                likedSongDao.getAllLikedIds(uid).collect { ids ->
+                    _likedSongIds.value = ids.toSet()
+                }
             }
         }
     }
@@ -113,6 +134,13 @@ class MusicRepository(private val context: Context) {
         controllerFuture?.addListener({
             mediaController = controllerFuture?.get()
             setupControllerListener()
+
+            // Set the like callback so notification heart button works
+            PlaybackService.likeCallback = { videoId, title, artist, thumbnailUrl ->
+                repositoryScope.launch {
+                    likeSong(videoId, title, artist, thumbnailUrl)
+                }
+            }
         }, MoreExecutors.directExecutor())
     }
 
@@ -167,8 +195,6 @@ class MusicRepository(private val context: Context) {
                     "Playback error at index $currentIndex: ${error.message}"
                 )
 
-                // If there are more tracks in the queue, skip to the next one.
-                // Otherwise, stop playback gracefully.
                 if (currentIndex < itemCount - 1) {
                     android.util.Log.d("SONARA_PLAYBACK", "Skipping to next track after error")
                     controller.seekToNext()
@@ -184,6 +210,10 @@ class MusicRepository(private val context: Context) {
         _isPlaying.value = mediaController?.isPlaying == true
         _currentMediaItem.value = mediaController?.currentMediaItem
         _currentQueueIndex.value = mediaController?.currentMediaItemIndex ?: 0
+        
+        // Ensure circular playback is synced
+        mediaController?.repeatMode = Player.REPEAT_MODE_ALL
+
         rebuildQueueItems()
     }
 
@@ -213,7 +243,6 @@ class MusicRepository(private val context: Context) {
 
         val nextItem = controller.getMediaItemAt(nextIndex)
         val nextUri = nextItem.localConfiguration?.uri
-        // Only preload if the next item still has a placeholder URI
         if (nextUri != null && (nextUri.scheme == "sonara" || nextUri.toString().isEmpty())) {
             repositoryScope.launch {
                 val videoId = nextItem.mediaId
@@ -222,8 +251,7 @@ class MusicRepository(private val context: Context) {
                     if (resolvedUrl.isNotEmpty()) {
                         val resolved = nextItem.buildUpon().setUri(resolvedUrl).build()
                         try {
-                            // Check again if it's still at that index or if the player is still valid
-                            if (controller.mediaItemCount > nextIndex && 
+                            if (controller.mediaItemCount > nextIndex &&
                                 controller.getMediaItemAt(nextIndex).mediaId == videoId) {
                                 controller.replaceMediaItem(nextIndex, resolved)
                                 android.util.Log.d("SONARA_JIT", "Successfully preloaded next track: $videoId")
@@ -260,9 +288,6 @@ class MusicRepository(private val context: Context) {
 
     fun setQueue(items: List<MediaItem>, startIndex: Int) {
         val controller = mediaController ?: return
-        // Resolve the starting track first for immediate playback.
-        // Remaining tracks are resolved on-demand when they become the current track
-        // via onMediaItemTransition preloading.
         repositoryScope.launch {
             val mutableItems = items.toMutableList()
             if (startIndex in items.indices) {
@@ -286,7 +311,6 @@ class MusicRepository(private val context: Context) {
         if (controller.mediaItemCount == 0) {
             setQueue(listOf(item), 0)
         } else {
-            // Resolve the URL in the background, then add with real URI
             repositoryScope.launch {
                 val videoId = item.mediaId
                 val resolvedItem = if (videoId.isNotEmpty()) {
@@ -304,6 +328,17 @@ class MusicRepository(private val context: Context) {
         mediaController?.moveMediaItem(fromIndex, toIndex)
     }
 
+    fun removeFromQueue(videoId: String) {
+        mediaController?.let { controller ->
+            for (i in 0 until controller.mediaItemCount) {
+                if (controller.getMediaItemAt(i).mediaId == videoId) {
+                    controller.removeMediaItem(i)
+                    break
+                }
+            }
+        }
+    }
+
     suspend fun searchWithDynamicUrl(url: String, query: String): List<InvidiousSearchItem> = withContext(Dispatchers.IO) {
         RetrofitClient.apiService.searchTracks(dynamicUrl = url, searchQuery = query)
     }
@@ -312,18 +347,8 @@ class MusicRepository(private val context: Context) {
         RetrofitClient.apiService.searchPlaylists(dynamicUrl = url, searchQuery = query)
     }
 
-    /**
-     * Resolves a playable audio stream URL for the given YouTube video ID.
-     *
-     * Checks in-memory cache first (instant). Falls back to NewPipeExtractor (~3s).
-     * Caches successful results for 30 minutes.
-     *
-     * Returns the stream URL, or empty string on failure.
-     * Never throws exceptions to the caller.
-     */
     suspend fun fetchAudioStreamLink(videoId: String): String = withContext(Dispatchers.IO) {
         try {
-            // Check cache first
             val cached = getCachedUrl(videoId)
             if (cached != null) {
                 android.util.Log.d("SONARA_CORE", "Cache hit for $videoId.")
@@ -361,11 +386,6 @@ class MusicRepository(private val context: Context) {
         urlCache[videoId] = Pair(url, System.currentTimeMillis())
     }
 
-    /**
-     * Resolves a stream URL via NewPipeExtractor.
-     * Filters to progressive HTTP audio streams and selects the highest bitrate.
-     * Returns the URL if successful, null otherwise.
-     */
     private suspend fun tryNewPipe(videoId: String): String? {
         return try {
             val watchUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -422,32 +442,34 @@ class MusicRepository(private val context: Context) {
     // --- Liked Songs Operations ---
 
     suspend fun likeSong(videoId: String, title: String, artist: String, thumbnailUrl: String) {
-        val entity = LikedSongEntity(videoId, title, artist, thumbnailUrl)
+        val entity = LikedSongEntity(videoId, title, artist, thumbnailUrl, userId = getUserId())
         likedSongDao.insert(entity)
-        // SILENT CLOUD SYNC (Optimistic UI: Local DB is already updated)
+        android.util.Log.d("SONARA_SYNC", "Local like saved. Launching cloud push for: $videoId")
+
         repositoryScope.launch {
             try {
                 syncManager.pushLikedSong(entity)
             } catch (e: Exception) {
-                android.util.Log.e("SONARA_SYNC", "Cloud backup failed for like: ${e.message}")
+                android.util.Log.e("SONARA_SYNC", "Cloud push exception for like: ${e.message}")
             }
         }
     }
 
     suspend fun unlikeSong(videoId: String) {
-        likedSongDao.delete(videoId)
-        // SILENT CLOUD SYNC
+        likedSongDao.delete(videoId, getUserId())
+        android.util.Log.d("SONARA_SYNC", "Local unlike saved. Launching cloud remove for: $videoId")
+
         repositoryScope.launch {
             try {
                 syncManager.removeLikedSong(videoId)
             } catch (e: Exception) {
-                android.util.Log.e("SONARA_SYNC", "Cloud deletion failed for unlike: ${e.message}")
+                android.util.Log.e("SONARA_SYNC", "Cloud remove exception for unlike: ${e.message}")
             }
         }
     }
 
     fun getLikedSongs(): Flow<List<LikedSongEntity>> {
-        return likedSongDao.getAllLikedSongs()
+        return likedSongDao.getAllLikedSongs(getUserId())
     }
 
     @OptIn(UnstableApi::class)
@@ -490,30 +512,31 @@ class MusicRepository(private val context: Context) {
                 title = title,
                 artist = artist,
                 thumbnailUrl = thumbnailUrl,
-                playedAt = System.currentTimeMillis()
+                playedAt = System.currentTimeMillis(),
+                userId = getUserId()
             )
         )
-        recentSongDao.trimToMax()
+        recentSongDao.trimToMax(getUserId())
     }
 
     fun getRecentSongs(): Flow<List<RecentSongEntity>> {
-        return recentSongDao.getRecentSongs()
+        return recentSongDao.getRecentSongs(getUserId())
     }
 
     fun getRecentSongsForHome(): Flow<List<RecentSongEntity>> {
-        return recentSongDao.getRecentSongsForHome()
+        return recentSongDao.getRecentSongsForHome(getUserId())
     }
 
     // --- Search History ---
 
     suspend fun recordSearch(query: String) {
         if (query.isBlank()) return
-        searchHistoryDao.insertSearch(SearchHistoryEntity(query = query))
-        searchHistoryDao.trimToMax()
+        searchHistoryDao.insertSearch(SearchHistoryEntity(query = query, userId = getUserId()))
+        searchHistoryDao.trimToMax(getUserId())
     }
 
     fun getRecentSearches(): Flow<List<SearchHistoryEntity>> {
-        return searchHistoryDao.getRecentSearches()
+        return searchHistoryDao.getRecentSearches(getUserId())
     }
 
     fun release() {
@@ -525,14 +548,16 @@ class MusicRepository(private val context: Context) {
     // --- Playlist Operations ---
 
     suspend fun createPlaylist(name: String): Long {
-        val newPlaylist = PlaylistEntity(name = name)
+        val remoteId = UUID.randomUUID().toString()
+        val newPlaylist = PlaylistEntity(name = name, remoteId = remoteId, userId = getUserId())
         val id = playlistDao.createPlaylist(newPlaylist)
-        // SILENT CLOUD SYNC
+        android.util.Log.d("SONARA_SYNC", "Local playlist created: $name (userId=${getUserId()})")
+
         repositoryScope.launch {
             try {
                 syncManager.pushPlaylist(newPlaylist.copy(id = id))
             } catch (e: Exception) {
-                android.util.Log.e("SONARA_SYNC", "Cloud backup failed for playlist: ${e.message}")
+                android.util.Log.e("SONARA_SYNC", "Cloud push exception for playlist: ${e.message}")
             }
         }
         return id
@@ -558,16 +583,25 @@ class MusicRepository(private val context: Context) {
             orderIndex = currentCount
         )
         playlistDao.addSongToPlaylist(songEntity)
+        android.util.Log.d("SONARA_SYNC", "Local playlist song saved: $videoId → playlistId=$playlistId")
 
-        // SILENT CLOUD SYNC
+        // Background push network call
         repositoryScope.launch {
+            android.util.Log.d("SONARA_SYNC", "Cloud push coroutine STARTED for playlist song: $videoId")
             try {
-                val playlist = playlistDao.getAllPlaylists().first().find { it.id == playlistId }
+                val playlist = playlistDao.getAllPlaylists(getUserId()).first().find { it.id == playlistId }
+                android.util.Log.d("SONARA_SYNC", "Found playlist for push: ${playlist?.name}, remoteId='${playlist?.remoteId}'")
                 playlist?.let {
-                    syncManager.pushSongToPlaylist(it.name, songEntity)
-                }
+                    val syncTargetId = it.remoteId.ifEmpty { it.name }
+                    if (syncTargetId.isNotEmpty()) {
+                        syncManager.pushSongToPlaylist(syncTargetId, songEntity)
+                        android.util.Log.d("SONARA_SYNC", "Successfully pushed playlist song to cloud: $videoId → playlist=$syncTargetId")
+                    } else {
+                        android.util.Log.e("SONARA_SYNC", "Cannot push song: playlist has no remoteId or name")
+                    }
+                } ?: android.util.Log.e("SONARA_SYNC", "Playlist not found for id=$playlistId")
             } catch (e: Exception) {
-                android.util.Log.e("SONARA_SYNC", "Cloud backup failed for playlist song: ${e.message}")
+                android.util.Log.e("SONARA_SYNC", "Cloud push exception for playlist song: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
         return true
@@ -577,13 +611,92 @@ class MusicRepository(private val context: Context) {
         return playlistDao.getSongsForPlaylist(playlistId)
     }
 
-    fun getAllPlaylists(): Flow<List<PlaylistEntity>> {
-        return playlistDao.getAllPlaylists()
+    fun getPlaylistById(playlistId: Long): Flow<PlaylistEntity?> {
+        return playlistDao.getPlaylistById(playlistId)
     }
 
-    /**
-     * Triggers a manual sync from cloud. Used on login or refresh.
-     */
+    suspend fun removeSongFromPlaylist(playlistId: Long, videoId: String) {
+        playlistDao.removeSongFromPlaylist(playlistId, videoId)
+        // Optionally update cloud sync here if needed
+        repositoryScope.launch {
+            try {
+                val playlist = playlistDao.getAllPlaylists(getUserId()).first().find { it.id == playlistId }
+                playlist?.let {
+                    val syncTargetId = it.remoteId.ifEmpty { it.name }
+                    if (syncTargetId.isNotEmpty()) {
+                        syncManager.removeSongFromPlaylist(syncTargetId, videoId)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SONARA_SYNC", "Failed to sync song removal: ${e.message}")
+            }
+        }
+    }
+
+    fun getAllPlaylists(): Flow<List<PlaylistEntity>> {
+        return playlistDao.getAllPlaylists(getUserId())
+    }
+
+    suspend fun deletePlaylist(playlistId: Long) {
+        // Get the playlist's remoteId before deleting locally
+        val playlists = playlistDao.getAllPlaylists(getUserId()).first()
+        val playlist = playlists.find { it.id == playlistId }
+        val remoteId = playlist?.remoteId ?: ""
+
+        // Delete locally
+        playlistDao.deletePlaylist(playlistId)
+
+        // Delete from cloud
+        if (remoteId.isNotEmpty()) {
+            repositoryScope.launch {
+                try {
+                    syncManager.removePlaylist(remoteId)
+                    android.util.Log.d("SONARA_SYNC", "Successfully deleted playlist from cloud: $remoteId")
+                } catch (e: Exception) {
+                    android.util.Log.e("SONARA_SYNC", "Cloud delete failed for playlist: ${e.message}")
+                }
+            }
+        }
+    }
+
+    suspend fun renamePlaylist(playlistId: Long, newName: String) {
+        val playlists = playlistDao.getAllPlaylists(getUserId()).first()
+        val playlist = playlists.find { it.id == playlistId }
+        playlist?.let {
+            val updated = it.copy(name = newName)
+            playlistDao.updatePlaylist(updated)
+            repositoryScope.launch {
+                try {
+                    syncManager.pushPlaylist(updated)
+                } catch (e: Exception) {
+                    android.util.Log.e("SONARA_SYNC", "Failed to sync rename: ${e.message}")
+                }
+            }
+        }
+    }
+
+    suspend fun reorderPlaylistSongs(playlistId: Long, fromIndex: Int, toIndex: Int) {
+        val songs = playlistDao.getSongsForPlaylist(playlistId).first().toMutableList()
+        if (fromIndex in songs.indices && toIndex in songs.indices) {
+            val song = songs.removeAt(fromIndex)
+            songs.add(toIndex, song)
+            
+            // Re-assign order indices
+            val updatedSongs = songs.mapIndexed { index, entity ->
+                entity.copy(orderIndex = index)
+            }
+            playlistDao.updatePlaylistSongs(updatedSongs)
+        }
+    }
+
+    fun getAllDownloadedSongs(): Flow<List<DownloadedSongEntity>> = downloadedSongDao.getAllDownloadedSongs(getUserId())
+
+    suspend fun insertDownloadedSong(song: DownloadedSongEntity) = downloadedSongDao.insert(song.copy(userId = getUserId()))
+
+    suspend fun deleteDownloadedSong(videoId: String) = downloadedSongDao.delete(videoId, getUserId())
+
+    fun isDownloaded(videoId: String): Flow<Boolean> = downloadedSongDao.isDownloaded(videoId, getUserId())
+
     fun performCloudSync() {
         repositoryScope.launch {
             syncManager.syncFromCloud()

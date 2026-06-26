@@ -3,6 +3,8 @@ package com.example.sonara
 import android.app.Application
 import com.example.sonara.auth.YouTubeAuthManager
 import com.example.sonara.network.NewPipeDownloaderImpl
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.localization.Localization
 
@@ -20,6 +22,21 @@ class SonaraApp : Application() {
 
         // Initialize YouTube authentication manager
         YouTubeAuthManager.init(this)
+
+        // CRITICAL: Configure Firestore BEFORE any other code accesses it.
+        try {
+            // Enable Firestore debug logging to see gRPC stream errors
+            FirebaseFirestore.setLoggingEnabled(true)
+
+            val db = FirebaseFirestore.getInstance("default")
+            val settings = FirebaseFirestoreSettings.Builder()
+                .setPersistenceEnabled(false)
+                .build()
+            db.firestoreSettings = settings
+            android.util.Log.d("SONARA_INIT", "Firestore configured: persistence=OFF, database=default")
+        } catch (e: Exception) {
+            android.util.Log.e("SONARA_INIT", "Failed to configure Firestore settings: ${e.message}")
+        }
 
         NewPipe.init(
             NewPipeDownloaderImpl.getInstance(),
