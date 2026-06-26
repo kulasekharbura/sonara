@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "955605237387",
+    "project_id": "sonara-auth-f1b00",
+    "storage_bucket": "sonara-auth-f1b00.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:955605237387:android:783e76daffb9a62a2e1e8e",
+        "android_client_info": {
+          "package_name": "com.example.sonara"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "955605237387-qraksnqsp64h02gpf4dcn4irt40qam1m.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.sonara",
+            "certificate_hash": "aea57ce4b84588d36e5b39698f1e7ac447409b27"
+          }
+        },
+        {
+          "client_id": "955605237387-kelfol6i255lcfhs79ffa07umt2kglic.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC96pZSUSVABbMpfzPF90TNExHnzKmJby0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "955605237387-kelfol6i255lcfhs79ffa07umt2kglic.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

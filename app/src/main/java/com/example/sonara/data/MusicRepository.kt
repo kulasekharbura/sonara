@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import androidx.annotation.OptIn
 import androidx.core.net.toUri
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -29,6 +30,9 @@ import com.example.sonara.data.db.PlaylistEntity
 import com.example.sonara.data.db.PlaylistSongEntity
 import com.example.sonara.data.db.RecentSongDao
 import com.example.sonara.data.db.RecentSongEntity
+import com.example.sonara.data.db.SearchHistoryDao
+import com.example.sonara.data.db.SearchHistoryEntity
+import com.example.sonara.data.CloudSyncManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -47,6 +51,9 @@ class MusicRepository(private val context: Context) {
     private val likedSongDao: LikedSongDao = database.likedSongDao()
     private val playlistDao: PlaylistDao = database.playlistDao()
     private val recentSongDao: RecentSongDao = database.recentSongDao()
+    private val searchHistoryDao: SearchHistoryDao = database.searchHistoryDao()
+
+    private val syncManager = CloudSyncManager(database)
 
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
@@ -201,14 +208,13 @@ class MusicRepository(private val context: Context) {
 
     private fun preloadNextTrack() {
         val controller = mediaController ?: return
-        val currentIndex = controller.currentMediaItemIndex
-        val nextIndex = currentIndex + 1
-        if (nextIndex >= controller.mediaItemCount) return
+        val nextIndex = controller.nextMediaItemIndex
+        if (nextIndex == C.INDEX_UNSET) return
 
         val nextItem = controller.getMediaItemAt(nextIndex)
         val nextUri = nextItem.localConfiguration?.uri
         // Only preload if the next item still has a placeholder URI
-        if (nextUri != null && nextUri.scheme == "sonara") {
+        if (nextUri != null && (nextUri.scheme == "sonara" || nextUri.toString().isEmpty())) {
             repositoryScope.launch {
                 val videoId = nextItem.mediaId
                 if (videoId.isNotEmpty()) {
@@ -216,7 +222,12 @@ class MusicRepository(private val context: Context) {
                     if (resolvedUrl.isNotEmpty()) {
                         val resolved = nextItem.buildUpon().setUri(resolvedUrl).build()
                         try {
-                            controller.replaceMediaItem(nextIndex, resolved)
+                            // Check again if it's still at that index or if the player is still valid
+                            if (controller.mediaItemCount > nextIndex && 
+                                controller.getMediaItemAt(nextIndex).mediaId == videoId) {
+                                controller.replaceMediaItem(nextIndex, resolved)
+                                android.util.Log.d("SONARA_JIT", "Successfully preloaded next track: $videoId")
+                            }
                         } catch (e: Exception) {
                             android.util.Log.w("SONARA_PRELOAD", "Could not preload track at $nextIndex: ${e.message}")
                         }
@@ -411,11 +422,28 @@ class MusicRepository(private val context: Context) {
     // --- Liked Songs Operations ---
 
     suspend fun likeSong(videoId: String, title: String, artist: String, thumbnailUrl: String) {
-        likedSongDao.insert(LikedSongEntity(videoId, title, artist, thumbnailUrl))
+        val entity = LikedSongEntity(videoId, title, artist, thumbnailUrl)
+        likedSongDao.insert(entity)
+        // SILENT CLOUD SYNC (Optimistic UI: Local DB is already updated)
+        repositoryScope.launch {
+            try {
+                syncManager.pushLikedSong(entity)
+            } catch (e: Exception) {
+                android.util.Log.e("SONARA_SYNC", "Cloud backup failed for like: ${e.message}")
+            }
+        }
     }
 
     suspend fun unlikeSong(videoId: String) {
         likedSongDao.delete(videoId)
+        // SILENT CLOUD SYNC
+        repositoryScope.launch {
+            try {
+                syncManager.removeLikedSong(videoId)
+            } catch (e: Exception) {
+                android.util.Log.e("SONARA_SYNC", "Cloud deletion failed for unlike: ${e.message}")
+            }
+        }
     }
 
     fun getLikedSongs(): Flow<List<LikedSongEntity>> {
@@ -476,6 +504,18 @@ class MusicRepository(private val context: Context) {
         return recentSongDao.getRecentSongsForHome()
     }
 
+    // --- Search History ---
+
+    suspend fun recordSearch(query: String) {
+        if (query.isBlank()) return
+        searchHistoryDao.insertSearch(SearchHistoryEntity(query = query))
+        searchHistoryDao.trimToMax()
+    }
+
+    fun getRecentSearches(): Flow<List<SearchHistoryEntity>> {
+        return searchHistoryDao.getRecentSearches()
+    }
+
     fun release() {
         controllerFuture?.let {
             MediaController.releaseFuture(it)
@@ -485,7 +525,17 @@ class MusicRepository(private val context: Context) {
     // --- Playlist Operations ---
 
     suspend fun createPlaylist(name: String): Long {
-        return playlistDao.createPlaylist(PlaylistEntity(name = name))
+        val newPlaylist = PlaylistEntity(name = name)
+        val id = playlistDao.createPlaylist(newPlaylist)
+        // SILENT CLOUD SYNC
+        repositoryScope.launch {
+            try {
+                syncManager.pushPlaylist(newPlaylist.copy(id = id))
+            } catch (e: Exception) {
+                android.util.Log.e("SONARA_SYNC", "Cloud backup failed for playlist: ${e.message}")
+            }
+        }
+        return id
     }
 
     suspend fun addSongToPlaylist(
@@ -499,16 +549,27 @@ class MusicRepository(private val context: Context) {
             return false
         }
         val currentCount = playlistDao.getSongCount(playlistId).first()
-        playlistDao.addSongToPlaylist(
-            PlaylistSongEntity(
-                playlistId = playlistId,
-                videoId = videoId,
-                title = title,
-                artist = artist,
-                thumbnailUrl = thumbnailUrl,
-                orderIndex = currentCount
-            )
+        val songEntity = PlaylistSongEntity(
+            playlistId = playlistId,
+            videoId = videoId,
+            title = title,
+            artist = artist,
+            thumbnailUrl = thumbnailUrl,
+            orderIndex = currentCount
         )
+        playlistDao.addSongToPlaylist(songEntity)
+
+        // SILENT CLOUD SYNC
+        repositoryScope.launch {
+            try {
+                val playlist = playlistDao.getAllPlaylists().first().find { it.id == playlistId }
+                playlist?.let {
+                    syncManager.pushSongToPlaylist(it.name, songEntity)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SONARA_SYNC", "Cloud backup failed for playlist song: ${e.message}")
+            }
+        }
         return true
     }
 
@@ -518,5 +579,14 @@ class MusicRepository(private val context: Context) {
 
     fun getAllPlaylists(): Flow<List<PlaylistEntity>> {
         return playlistDao.getAllPlaylists()
+    }
+
+    /**
+     * Triggers a manual sync from cloud. Used on login or refresh.
+     */
+    fun performCloudSync() {
+        repositoryScope.launch {
+            syncManager.syncFromCloud()
+        }
     }
 }

@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.google.services)
 }
 
 android {
@@ -42,6 +43,12 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+
+    // Firebase & Auth Infrastructure
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth)
+    implementation(libs.firebase.firestore)
+    implementation(libs.play.services.auth)
 
     // Compose Platform BOM & UI Components
     implementation(platform(libs.androidx.compose.bom))
@@ -89,6 +96,11 @@ dependencies {
 
     // Required so NewPipeExtractor's use of java.time works on minSdk 24 (java.time is API 26+).
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+}
 
-
+configurations.all {
+    resolutionStrategy {
+        force("com.google.protobuf:protobuf-javalite:3.25.1")
+        force("com.google.firebase:protolite-well-known-types:18.0.0")
+    }
 }

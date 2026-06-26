@@ -40,6 +40,17 @@ class NewPipeDownloaderImpl private constructor(
             .url(url)
             .addHeader("User-Agent", USER_AGENT)
 
+        // Inject YouTube Authentication Cookies if available
+        val cookies = com.example.sonara.auth.YouTubeAuthManager.getCookies()
+        if (cookies.isNotEmpty() && (url.contains("youtube.com") || url.contains("googlevideo.com"))) {
+            requestBuilder.addHeader("Cookie", cookies)
+            
+            // Also inject SAPISIDHASH for authorized player requests
+            com.example.sonara.auth.YouTubeAuthManager.generateAuthHeader()?.let { authHeader ->
+                requestBuilder.addHeader("Authorization", authHeader)
+            }
+        }
+
         // Apply NewPipe-supplied headers. A header can legitimately have multiple values
         // (e.g. Set-Cookie), so add each value rather than overwriting.
         headers.forEach { (headerName, headerValueList) ->

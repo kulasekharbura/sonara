@@ -35,7 +35,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.sonara.data.db.LikedSongEntity
+import com.example.sonara.data.db.PlaylistSongEntity
+import com.example.sonara.data.db.RecentSongEntity
 import com.example.sonara.ui.theme.SpotifyLightGray
+
+// Unified song data for display
+data class SongDisplayItem(
+    val videoId: String,
+    val title: String,
+    val artist: String,
+    val thumbnailUrl: String
+)
 
 /**
  * A composable that displays songs from liked songs, recent songs, or a custom playlist.
@@ -62,21 +73,13 @@ fun PlaylistDetailScreen(
     // Collect the appropriate song list based on playlist type
     val likedSongs by remember(playlistType) {
         viewModel.getLikedSongs()
-    }.collectAsState(initial = emptyList())
+    }.collectAsState(initial = emptyList<LikedSongEntity>())
 
     val recentSongs by viewModel.recentSongs.collectAsState()
 
     val playlistSongs by remember(playlistType, playlistId) {
         viewModel.getPlaylistSongs(playlistId)
-    }.collectAsState(initial = emptyList())
-
-    // Unified song data for display
-    data class SongDisplayItem(
-        val videoId: String,
-        val title: String,
-        val artist: String,
-        val thumbnailUrl: String
-    )
+    }.collectAsState(initial = emptyList<PlaylistSongEntity>())
 
     val songs: List<SongDisplayItem> = when (playlistType) {
         "liked" -> likedSongs.map { SongDisplayItem(it.videoId, it.title, it.artist, it.thumbnailUrl) }

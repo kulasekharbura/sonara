@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface RecentSongDao {
-    @Query("SELECT * FROM recent_songs ORDER BY playedAt DESC LIMIT 50")
+    @Query("SELECT * FROM recent_songs ORDER BY playedAt DESC LIMIT 20")
     fun getRecentSongs(): Flow<List<RecentSongEntity>>
 
     @Query("SELECT * FROM recent_songs ORDER BY playedAt DESC LIMIT 10")
@@ -17,6 +17,6 @@ interface RecentSongDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(song: RecentSongEntity)
 
-    @Query("DELETE FROM recent_songs WHERE videoId NOT IN (SELECT videoId FROM recent_songs ORDER BY playedAt DESC LIMIT 50)")
+    @Query("DELETE FROM recent_songs WHERE videoId NOT IN (SELECT videoId FROM recent_songs ORDER BY playedAt DESC LIMIT 20)")
     suspend fun trimToMax()
 }

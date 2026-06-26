@@ -8,6 +8,7 @@ import com.example.sonara.data.db.LikedSongEntity
 import com.example.sonara.data.db.PlaylistEntity
 import com.example.sonara.data.db.PlaylistSongEntity
 import com.example.sonara.data.db.RecentSongEntity
+import com.example.sonara.data.db.SearchHistoryEntity
 import com.example.sonara.data.models.QueueTrack
 import com.example.sonara.data.models.RepeatMode
 import com.example.sonara.data.models.SearchPlaylistItem
@@ -56,6 +57,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     private val _recentSongsForHome = MutableStateFlow<List<RecentSongEntity>>(emptyList())
     val recentSongsForHome: StateFlow<List<RecentSongEntity>> = _recentSongsForHome.asStateFlow()
 
+    private val _recentSearches = MutableStateFlow<List<SearchHistoryEntity>>(emptyList())
+    val recentSearches: StateFlow<List<SearchHistoryEntity>> = _recentSearches.asStateFlow()
+
     // Search playlists
     private val _searchPlaylists = MutableStateFlow<List<SearchPlaylistItem>>(emptyList())
     val searchPlaylists: StateFlow<List<SearchPlaylistItem>> = _searchPlaylists.asStateFlow()
@@ -78,6 +82,11 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             repository.getRecentSongsForHome().collect { _recentSongsForHome.value = it }
         }
+        viewModelScope.launch {
+            repository.getRecentSearches().collect { _recentSearches.value = it }
+        }
+        // Trigger initial cloud sync for authenticated users
+        repository.performCloudSync()
     }
 
     private val invidiousInstances = listOf(
@@ -225,6 +234,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         if (query.isBlank()) return
 
         viewModelScope.launch {
+            repository.recordSearch(query)
             _isSearching.value = true
             var searchSuccess = false
 
@@ -317,6 +327,10 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     fun getLikedSongs(): Flow<List<LikedSongEntity>> = repository.getLikedSongs()
 
     fun getPlaylistSongs(playlistId: Long): Flow<List<PlaylistSongEntity>> = repository.getPlaylistSongs(playlistId)
+
+    fun performCloudSync() {
+        repository.performCloudSync()
+    }
 
     fun playFromLikedSongs(startIndex: Int) {
         viewModelScope.launch {

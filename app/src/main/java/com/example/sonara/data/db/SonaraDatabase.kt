@@ -10,9 +10,10 @@ import androidx.room.RoomDatabase
         LikedSongEntity::class,
         PlaylistEntity::class,
         PlaylistSongEntity::class,
-        RecentSongEntity::class
+        RecentSongEntity::class,
+        SearchHistoryEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class SonaraDatabase : RoomDatabase() {
@@ -20,6 +21,7 @@ abstract class SonaraDatabase : RoomDatabase() {
     abstract fun likedSongDao(): LikedSongDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun recentSongDao(): RecentSongDao
+    abstract fun searchHistoryDao(): SearchHistoryDao
 
     companion object {
         @Volatile
@@ -31,7 +33,9 @@ abstract class SonaraDatabase : RoomDatabase() {
                     context.applicationContext,
                     SonaraDatabase::class.java,
                     "sonara_database"
-                ).build()
+                )
+                .fallbackToDestructiveMigration()
+                .build()
                 INSTANCE = instance
                 instance
             }

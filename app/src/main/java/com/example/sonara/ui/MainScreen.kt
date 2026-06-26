@@ -58,6 +58,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +69,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -76,6 +78,8 @@ import com.example.sonara.data.models.RepeatMode
 import com.example.sonara.network.YoutubeSearchItem
 import com.example.sonara.ui.theme.SpotifyGreen
 import com.example.sonara.ui.theme.SpotifyLightGray
+import com.google.firebase.auth.FirebaseAuth
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 enum class Screen(val title: String, val icon: ImageVector) {
@@ -146,7 +150,7 @@ fun MainScreen(viewModel: PlaybackViewModel) {
                 Screen.Home -> HomeScreen(viewModel)
                 Screen.Search -> SearchTabContent(viewModel)
                 Screen.Library -> LibraryScreen(viewModel)
-                Screen.Profile -> ProfileTabContent()
+                Screen.Profile -> ProfileTabContent(viewModel)
             }
         }
 
@@ -233,6 +237,22 @@ fun SearchTabContent(viewModel: PlaybackViewModel) {
         if (isSearching) {
             Box(modifier = Modifier.fillMaxWidth().height(200.dp), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = SpotifyGreen)
+            }
+        } else if (searchQuery.isEmpty()) {
+            val recentSearches by viewModel.recentSearches.collectAsState()
+            if (recentSearches.isNotEmpty()) {
+                Text("Recent Searches", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                Spacer(Modifier.height(8.dp))
+                recentSearches.forEach { search ->
+                    Text(
+                        text = search.query,
+                        color = SpotifyLightGray,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { searchQuery = search.query }
+                            .padding(vertical = 8.dp)
+                    )
+                }
             }
         } else {
             LazyColumn(
@@ -714,15 +734,19 @@ fun PlaybackSliderComponent(viewModel: PlaybackViewModel) {
 }
 
 @Composable
-fun ProfileTabContent() {
+fun ProfileTabContent(viewModel: PlaybackViewModel) {
     var showLogin by remember { mutableStateOf(false) }
-    var isLoggedIn by remember { mutableStateOf(YouTubeAuthManager.isLoggedIn()) }
+    val auth = FirebaseAuth.getInstance()
+    var user by remember { mutableStateOf(auth.currentUser) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     if (showLogin) {
         LoginScreen(
             onLoginComplete = {
-                isLoggedIn = true
+                user = auth.currentUser
                 showLogin = false
+                viewModel.performCloudSync()
             }
         )
     } else {
@@ -733,30 +757,38 @@ fun ProfileTabContent() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            if (isLoggedIn) {
-                Icon(
-                    imageVector = Icons.Default.Person,
-                    contentDescription = "Signed in",
-                    tint = SpotifyGreen,
-                    modifier = Modifier.size(64.dp)
+            if (user != null) {
+                AsyncImage(
+                    model = user?.photoUrl,
+                    contentDescription = "Profile Picture",
+                    modifier = Modifier
+                        .size(80.dp)
+                        .clip(CircleShape)
+                        .background(Color.DarkGray),
+                    contentScale = ContentScale.Crop
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "Signed in to YouTube",
+                    text = user?.displayName ?: "Sonara User",
                     color = Color.White,
                     style = MaterialTheme.typography.titleLarge
                 )
-                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Authenticated playback is active",
+                    text = "Authenticated playback & sync active",
                     color = SpotifyLightGray,
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(modifier = Modifier.height(32.dp))
                 Button(
                     onClick = {
-                        YouTubeAuthManager.clearCookies()
-                        isLoggedIn = false
+                        scope.launch {
+                            val tapClient = com.google.android.gms.auth.api.identity.Identity.getSignInClient(context)
+                            tapClient.signOut().addOnCompleteListener {
+                                auth.signOut()
+                                YouTubeAuthManager.clearCookies()
+                                user = null
+                            }
+                        }
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFF282828)
