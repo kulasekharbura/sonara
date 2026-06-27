@@ -22,4 +22,7 @@ interface LikedSongDao {
 
     @Query("SELECT COUNT(*) FROM liked_songs WHERE userId = :userId")
     fun getCount(userId: String): Flow<Int>
+
+    @Query("SELECT * FROM liked_songs WHERE videoId = :videoId AND userId = :userId LIMIT 1")
+    suspend fun getLikedSong(videoId: String, userId: String): LikedSongEntity?
 }

@@ -34,7 +34,6 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -62,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -76,7 +76,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -99,12 +98,12 @@ enum class Screen(val title: String, val icon: ImageVector) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(viewModel: PlaybackViewModel) {
+fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false) {
     // Navigation back stack: Home is always the root
     var currentScreen by remember { mutableStateOf(Screen.Home) }
-    var navStackSize by remember { mutableStateOf(0) } // observable trigger for recomposition
+    var navStackSize by remember { mutableIntStateOf(0) } // observable trigger for recomposition
     val navigationStack = remember { mutableListOf<Screen>() } // actual history
-    var isPlayerSheetVisible by remember { mutableStateOf(false) }
+    var isPlayerSheetVisible by remember { mutableStateOf(initialOpenPlayer) }
     var selectedSongForGlobalMenu by remember { mutableStateOf<SongDisplayItem?>(null) }
     var showAddToPlaylistFor by remember { mutableStateOf<YoutubeSearchItem?>(null) }
 
@@ -114,7 +113,7 @@ fun MainScreen(viewModel: PlaybackViewModel) {
     // Back gesture handler: navigate back through tab history, close app from Home
     BackHandler(enabled = !isPlayerSheetVisible && navStackSize > 0) {
         if (navigationStack.isNotEmpty()) {
-            currentScreen = navigationStack.removeLast()
+            currentScreen = navigationStack.removeAt(navigationStack.lastIndex)
             navStackSize = navigationStack.size
         }
     }
@@ -132,24 +131,26 @@ fun MainScreen(viewModel: PlaybackViewModel) {
     Scaffold(
         bottomBar = {
             Column(modifier = Modifier.background(Color.Black)) {
-                MiniPlayerBar(
-                    isPlaying = isPlaying,
-                    trackTitle = currentTrack?.mediaMetadata?.title?.toString() ?: "No Track Playing",
-                    trackArtist = currentTrack?.mediaMetadata?.artist?.toString() ?: "Sonara Stream Engine",
-                    thumbnailUrl = currentTrack?.mediaMetadata?.artworkUri?.toString(),
-                    onPlayPauseToggle = { viewModel.playPause() },
-                    onBarClick = { isPlayerSheetVisible = true },
-                    onMenuClick = {
-                        currentTrack?.let { track ->
-                            selectedSongForGlobalMenu = SongDisplayItem(
-                                videoId = track.mediaId,
-                                title = track.mediaMetadata.title.toString(),
-                                artist = track.mediaMetadata.artist.toString(),
-                                thumbnailUrl = track.mediaMetadata.artworkUri.toString(),
-                            )
+                if (currentTrack != null) {
+                    MiniPlayerBar(
+                        isPlaying = isPlaying,
+                        trackTitle = currentTrack?.mediaMetadata?.title?.toString() ?: "No Track Playing",
+                        trackArtist = currentTrack?.mediaMetadata?.artist?.toString() ?: "Sonara Stream Engine",
+                        thumbnailUrl = currentTrack?.mediaMetadata?.artworkUri?.toString(),
+                        onPlayPauseToggle = { viewModel.playPause() },
+                        onBarClick = { isPlayerSheetVisible = true },
+                        onMenuClick = {
+                            currentTrack?.let { track ->
+                                selectedSongForGlobalMenu = SongDisplayItem(
+                                    videoId = track.mediaId,
+                                    title = track.mediaMetadata.title.toString(),
+                                    artist = track.mediaMetadata.artist.toString(),
+                                    thumbnailUrl = track.mediaMetadata.artworkUri.toString(),
+                                )
+                            }
                         }
-                    }
-                )
+                    )
+                }
 
                 NavigationBar(containerColor = Color.Black) {
                     Screen.entries.forEach { screen ->
@@ -161,7 +162,7 @@ fun MainScreen(viewModel: PlaybackViewModel) {
                                     // Push current screen to back stack before navigating
                                     navigationStack.add(currentScreen)
                                     // Keep stack reasonable (max 10 entries)
-                                    if (navigationStack.size > 10) navigationStack.removeFirst()
+                                    if (navigationStack.size > 10) navigationStack.removeAt(0)
                                     navStackSize = navigationStack.size
                                     currentScreen = screen
                                 }
@@ -289,7 +290,7 @@ fun MainScreen(viewModel: PlaybackViewModel) {
                     onAddToQueue = { viewModel.addToQueue(song.videoId, song.title, song.artist, song.thumbnailUrl); selectedSongForGlobalMenu = null },
                     onGoToQueue = { /* navigate to queue */ selectedSongForGlobalMenu = null },
                     onDownload = { viewModel.downloadSong(context, song.videoId, song.title, song.artist, song.thumbnailUrl); selectedSongForGlobalMenu = null },
-                    onRemoveDownload = { viewModel.deleteDownloadedSong(context, song.videoId, song.title); selectedSongForGlobalMenu = null }
+                    onRemoveDownload = { viewModel.deleteDownloadedSong(context, song.videoId, song.title, song.artist); selectedSongForGlobalMenu = null }
                 )
             }
         }
@@ -757,7 +758,7 @@ fun FullPlayerOverlay(
 
             IconButton(onClick = { showAddToPlaylistOverlay = true }) {
                 Icon(
-                    Icons.Default.PlaylistAdd,
+                    Icons.AutoMirrored.Filled.PlaylistAdd,
                     contentDescription = "Add to Playlist",
                     tint = SpotifyLightGray,
                     modifier = Modifier.size(24.dp)

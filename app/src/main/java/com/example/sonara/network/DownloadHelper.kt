@@ -36,6 +36,7 @@ object DownloadHelper {
     suspend fun downloadWithStatus(
         context: Context,
         url: String,
+        videoId: String,
         title: String,
         artist: String,
         thumbnailUrl: String,
@@ -52,7 +53,9 @@ object DownloadHelper {
         }
 
         val safeTitle = title.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Track" }
-        val fileName = "$safeTitle.m4a"
+        val safeArtist = artist.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Artist" }
+        val fileName = "${safeTitle}_${safeArtist}_$videoId.m4a"
+        val tempFileName = "$fileName.tmp"
 
         if (showToasts) {
             withContext(Dispatchers.Main) {
@@ -61,6 +64,7 @@ object DownloadHelper {
         }
 
         withContext(Dispatchers.IO) {
+            var tempFile: File? = null
             try {
                 // Ensure Sonara folder exists
                 val sonaraDir = File(
@@ -70,7 +74,9 @@ object DownloadHelper {
                 if (!sonaraDir.exists()) sonaraDir.mkdirs()
 
                 val outputFile = File(sonaraDir, fileName)
-                Log.d(TAG, "Downloading: $title → ${outputFile.absolutePath}")
+                tempFile = File(sonaraDir, tempFileName)
+
+                Log.d(TAG, "Downloading: $title → ${tempFile.absolutePath}")
                 Log.d(TAG, "URL: ${url.take(100)}...")
 
                 val request = Request.Builder()
@@ -105,7 +111,7 @@ object DownloadHelper {
                 var totalBytesRead = 0L
                 val buffer = ByteArray(8192)
 
-                FileOutputStream(outputFile).use { fos ->
+                FileOutputStream(tempFile).use { fos ->
                     body.byteStream().use { inputStream ->
                         var bytesRead: Int
                         while (inputStream.read(buffer).also { bytesRead = it } != -1) {
@@ -122,14 +128,28 @@ object DownloadHelper {
                     }
                 }
 
-                // Final progress = 100
-                withContext(Dispatchers.Main) {
-                    onProgress(100)
+                // Rename temp to final
+                if (tempFile.renameTo(outputFile)) {
+                    Log.i(TAG, "Download complete and renamed: $title (${totalBytesRead / 1024} KB)")
+                    // Final progress = 100
+                    withContext(Dispatchers.Main) {
+                        onProgress(100)
+                    }
+                } else {
+                    Log.e(TAG, "Failed to rename temp file for $title")
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Download failed: could not save file", Toast.LENGTH_SHORT).show()
+                    }
                 }
-                Log.i(TAG, "Download complete: $title (${totalBytesRead / 1024} KB)")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Download exception for $title: ${e.javaClass.simpleName}: ${e.message}")
+                tempFile?.let {
+                    if (it.exists()) {
+                        it.delete()
+                        Log.d(TAG, "Deleted partial temp file after error: ${it.name}")
+                    }
+                }
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
@@ -137,13 +157,17 @@ object DownloadHelper {
         }
     }
 
-    fun removeDownload(context: Context, title: String) {
+    fun removeDownload(context: Context, videoId: String, title: String, artist: String) {
         val safeTitle = title.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Track" }
-        val fileName = "$safeTitle.m4a"
-        val file = File(
+        val safeArtist = artist.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Artist" }
+        val fileName = "${safeTitle}_${safeArtist}_$videoId.m4a"
+        val tempFileName = "$fileName.tmp"
+        val sonaraDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "Sonara/$fileName"
+            "Sonara"
         )
+        
+        val file = File(sonaraDir, fileName)
         if (file.exists()) {
             if (file.delete()) {
                 Log.i(TAG, "Deleted file: ${file.absolutePath}")
@@ -151,15 +175,31 @@ object DownloadHelper {
                 Log.w(TAG, "Failed to delete file: ${file.absolutePath}")
             }
         }
+
+        val tempFile = File(sonaraDir, tempFileName)
+        if (tempFile.exists()) {
+            tempFile.delete()
+        }
+
+        // Also try to delete the old format file just in case
+        val oldFileName = "$safeTitle.m4a"
+        val oldFile = File(sonaraDir, oldFileName)
+        if (oldFile.exists()) oldFile.delete()
     }
 
-    fun isFileDownloaded(title: String): Boolean {
+    fun isFileDownloaded(videoId: String, title: String, artist: String): Boolean {
         val safeTitle = title.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Track" }
-        val fileName = "$safeTitle.m4a"
-        val file = File(
+        val safeArtist = artist.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Artist" }
+        val fileName = "${safeTitle}_${safeArtist}_$videoId.m4a"
+        val sonaraDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "Sonara/$fileName"
+            "Sonara"
         )
-        return file.exists()
+        val file = File(sonaraDir, fileName)
+        if (file.exists()) return true
+
+        // Check old format for compatibility
+        val oldFileName = "$safeTitle.m4a"
+        return File(sonaraDir, oldFileName).exists()
     }
 }

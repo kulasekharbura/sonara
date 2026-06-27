@@ -80,7 +80,7 @@ class MusicRepository(private val context: Context) {
     private val _duration = MutableStateFlow(0L)
     val duration: StateFlow<Long> = _duration.asStateFlow()
 
-    private val _repeatMode = MutableStateFlow(RepeatMode.OFF)
+    private val _repeatMode = MutableStateFlow(RepeatMode.ALL)
     val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow()
 
     private val _shuffleEnabled = MutableStateFlow(false)
@@ -122,6 +122,8 @@ class MusicRepository(private val context: Context) {
                 // Flow of Flow: collect the inner flow from Room
                 likedSongDao.getAllLikedIds(uid).collect { ids ->
                     _likedSongIds.value = ids.toSet()
+                    // Sync with PlaybackService for notification UI
+                    com.example.sonara.playback.PlaybackService.globalLikedIds = ids.toSet()
                 }
             }
         }
@@ -138,7 +140,11 @@ class MusicRepository(private val context: Context) {
             // Set the like callback so notification heart button works
             PlaybackService.likeCallback = { videoId, title, artist, thumbnailUrl ->
                 repositoryScope.launch {
-                    likeSong(videoId, title, artist, thumbnailUrl)
+                    if (likedSongIds.value.contains(videoId)) {
+                        unlikeSong(videoId)
+                    } else {
+                        likeSong(videoId, title, artist, thumbnailUrl)
+                    }
                 }
             }
         }, MoreExecutors.directExecutor())
@@ -177,6 +183,7 @@ class MusicRepository(private val context: Context) {
                 _repeatMode.value = when (repeatMode) {
                     Player.REPEAT_MODE_ALL -> RepeatMode.ALL
                     Player.REPEAT_MODE_ONE -> RepeatMode.ONE
+                    Player.REPEAT_MODE_OFF -> RepeatMode.OFF
                     else -> RepeatMode.OFF
                 }
             }
@@ -211,8 +218,14 @@ class MusicRepository(private val context: Context) {
         _currentMediaItem.value = mediaController?.currentMediaItem
         _currentQueueIndex.value = mediaController?.currentMediaItemIndex ?: 0
         
-        // Ensure circular playback is synced
-        mediaController?.repeatMode = Player.REPEAT_MODE_ALL
+        // Ensure initial repeat mode is set and synced
+        val initialMode = mediaController?.repeatMode ?: Player.REPEAT_MODE_ALL
+        mediaController?.repeatMode = initialMode
+        _repeatMode.value = when (initialMode) {
+            Player.REPEAT_MODE_ALL -> RepeatMode.ALL
+            Player.REPEAT_MODE_ONE -> RepeatMode.ONE
+            else -> RepeatMode.OFF
+        }
 
         rebuildQueueItems()
     }
@@ -301,6 +314,14 @@ class MusicRepository(private val context: Context) {
                 }
             }
             controller.setMediaItems(mutableItems, startIndex, 0L)
+            
+            // Re-apply current repeat mode to new queue
+            controller.repeatMode = when (_repeatMode.value) {
+                RepeatMode.OFF -> Player.REPEAT_MODE_OFF
+                RepeatMode.ONE -> Player.REPEAT_MODE_ONE
+                RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+            }
+            
             controller.prepare()
             controller.play()
         }
@@ -494,6 +515,14 @@ class MusicRepository(private val context: Context) {
                 controller.apply {
                     stop()
                     setMediaItem(mediaItem)
+                    
+                    // Re-apply current repeat mode to new item
+                    repeatMode = when (_repeatMode.value) {
+                        RepeatMode.OFF -> Player.REPEAT_MODE_OFF
+                        RepeatMode.ONE -> Player.REPEAT_MODE_ONE
+                        RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+                    }
+
                     prepare()
                     play()
                 }
@@ -696,6 +725,25 @@ class MusicRepository(private val context: Context) {
     suspend fun deleteDownloadedSong(videoId: String) = downloadedSongDao.delete(videoId, getUserId())
 
     fun isDownloaded(videoId: String): Flow<Boolean> = downloadedSongDao.isDownloaded(videoId, getUserId())
+
+    /**
+     * Attempts to find a thumbnail URL for a song by its videoId.
+     * Searches in liked songs, playlists, and recent history.
+     */
+    suspend fun findThumbnailUrl(videoId: String): String = withContext(Dispatchers.IO) {
+        val uid = getUserId()
+        
+        // Check liked songs
+        likedSongDao.getLikedSong(videoId, uid)?.thumbnailUrl?.let { if (it.isNotEmpty()) return@withContext it }
+        
+        // Check playlists
+        playlistDao.getSongAcrossPlaylists(videoId, uid)?.thumbnailUrl?.let { if (it.isNotEmpty()) return@withContext it }
+        
+        // Check recent songs
+        recentSongDao.getRecentSong(videoId, uid)?.thumbnailUrl?.let { if (it.isNotEmpty()) return@withContext it }
+        
+        ""
+    }
 
     fun performCloudSync() {
         repositoryScope.launch {

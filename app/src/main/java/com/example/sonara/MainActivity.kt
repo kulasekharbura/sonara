@@ -29,10 +29,12 @@ class MainActivity : ComponentActivity() {
 
         checkAndRequestPermissions()
 
+        val openFullPlayer = intent?.getBooleanExtra("OPEN_FULL_PLAYER", false) ?: false
+
         setContent {
             SonaraTheme {
                 // Mount the modern Spotify-style structural dock
-                MainScreen(viewModel = playbackViewModel)
+                MainScreen(viewModel = playbackViewModel, initialOpenPlayer = openFullPlayer)
             }
         }
     }

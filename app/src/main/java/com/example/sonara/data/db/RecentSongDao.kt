@@ -19,4 +19,7 @@ interface RecentSongDao {
 
     @Query("DELETE FROM recent_songs WHERE userId = :userId AND videoId NOT IN (SELECT videoId FROM recent_songs WHERE userId = :userId ORDER BY playedAt DESC LIMIT 20)")
     suspend fun trimToMax(userId: String)
+
+    @Query("SELECT * FROM recent_songs WHERE videoId = :videoId AND userId = :userId LIMIT 1")
+    suspend fun getRecentSong(videoId: String, userId: String): RecentSongEntity?
 }

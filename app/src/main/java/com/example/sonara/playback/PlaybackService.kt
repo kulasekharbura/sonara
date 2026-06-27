@@ -2,13 +2,15 @@ package com.example.sonara.playback
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Bundle
 import androidx.annotation.OptIn
-import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
@@ -25,16 +27,28 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import androidx.media3.session.DefaultMediaNotificationProvider
 import com.google.common.util.concurrent.ListenableFuture
 import java.io.File
+import com.example.sonara.R
+import com.example.sonara.MainActivity
+import com.google.common.collect.ImmutableList
 
 @OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
 
     companion object {
         const val ACTION_LIKE = "com.example.sonara.ACTION_LIKE"
-        /** Called by the notification like button. Set by MusicRepository. */
         var likeCallback: ((videoId: String, title: String, artist: String, thumbnailUrl: String) -> Unit)? = null
+        
+        @Volatile
+        var globalLikedIds: Set<String> = emptySet()
+            set(value) {
+                field = value
+                instance?.updateHeartIcon()
+            }
+        
+        private var instance: PlaybackService? = null
     }
 
     private var player: ExoPlayer? = null
@@ -43,13 +57,31 @@ class PlaybackService : MediaSessionService() {
     private var cacheDataSourceFactory: CacheDataSource.Factory? = null
 
     private val CHANNEL_ID = "sonara_playback_channel"
-    private val NOTIFICATION_ID = 101
+
+    private fun updateHeartIcon() {
+        val currentItem = player?.currentMediaItem ?: return
+        val isLiked = globalLikedIds.contains(currentItem.mediaId)
+        updateNotificationLayout(isLiked)
+    }
+
+    private fun updateNotificationLayout(isLiked: Boolean) {
+        val iconRes = if (isLiked) R.drawable.ic_heart_filled else R.drawable.ic_heart_border
+        val displayName = if (isLiked) "Unlike" else "Like"
+        
+        mediaSession?.setCustomLayout(listOf(
+            CommandButton.Builder()
+                .setDisplayName(displayName)
+                .setIconResId(iconRes)
+                .setSessionCommand(SessionCommand(ACTION_LIKE, Bundle.EMPTY))
+                .build()
+        ))
+    }
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
+        instance = this
 
-        // 1. Establish the OS Notification Channel to clear ActivityManager rules
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -62,30 +94,61 @@ class PlaybackService : MediaSessionService() {
             manager.createNotificationChannel(channel)
         }
 
-        // 2. Build a persistent baseline notification layout wrapper
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("Sonara Stream Engine")
-            .setContentText("Preparing active audio channel...")
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setOngoing(true)
-            .build()
+        // Custom Notification Provider to force the Heart icon to the right (after standard controls)
+        setMediaNotificationProvider(object : DefaultMediaNotificationProvider(this) {
+            override fun getMediaButtons(
+                session: MediaSession,
+                playerCommands: Player.Commands,
+                customLayout: ImmutableList<CommandButton>,
+                showCustomButtonsInCompactView: Boolean
+            ): ImmutableList<CommandButton> {
+                val buttons = mutableListOf<CommandButton>()
+                
+                // 1. Standard Playback Buttons (Left/Center)
+                if (playerCommands.contains(Player.COMMAND_SEEK_TO_PREVIOUS)) {
+                    buttons.add(getStandardButton(session, Player.COMMAND_SEEK_TO_PREVIOUS))
+                }
+                buttons.add(getStandardButton(session, Player.COMMAND_PLAY_PAUSE))
+                if (playerCommands.contains(Player.COMMAND_SEEK_TO_NEXT)) {
+                    buttons.add(getStandardButton(session, Player.COMMAND_SEEK_TO_NEXT))
+                }
+                
+                // 2. Custom Like Button (Right Most)
+                buttons.addAll(customLayout)
+                
+                return ImmutableList.copyOf(buttons)
+            }
+            
+            private fun getStandardButton(session: MediaSession, command: Int): CommandButton {
+                return when (command) {
+                    Player.COMMAND_SEEK_TO_PREVIOUS -> CommandButton.Builder()
+                        .setDisplayName("Previous")
+                        .setIconResId(android.R.drawable.ic_media_previous)
+                        .setPlayerCommand(Player.COMMAND_SEEK_TO_PREVIOUS)
+                        .build()
+                    Player.COMMAND_PLAY_PAUSE -> {
+                        val isPlaying = session.player.isPlaying
+                        CommandButton.Builder()
+                            .setDisplayName(if (isPlaying) "Pause" else "Play")
+                            .setIconResId(if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
+                            .setPlayerCommand(Player.COMMAND_PLAY_PAUSE)
+                            .build()
+                    }
+                    Player.COMMAND_SEEK_TO_NEXT -> CommandButton.Builder()
+                        .setDisplayName("Next")
+                        .setIconResId(android.R.drawable.ic_media_next)
+                        .setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT)
+                        .build()
+                    else -> throw IllegalArgumentException()
+                }
+            }
+        })
 
-        // 3. Promote the worker to an authenticated Foreground Service immediately
-        try {
-            startForeground(NOTIFICATION_ID, notification)
-        } catch (e: Exception) {
-            android.util.Log.e("SONARA_SERVICE", "Foreground conversion rejected by OS", e)
-        }
-
-        // 4. Set up progressive audio cache (200 MB LRU)
         val cacheDir = File(cacheDir, "sonara_audio_cache")
         val cacheEvictor = LeastRecentlyUsedCacheEvictor(200L * 1024 * 1024)
         val databaseProvider = StandaloneDatabaseProvider(this)
         cache = SimpleCache(cacheDir, cacheEvictor, databaseProvider)
 
-        // 5. Build CacheDataSource.Factory wrapping DefaultDataSource.Factory
         val upstreamFactory = DefaultDataSource.Factory(this)
         cacheDataSourceFactory = CacheDataSource.Factory()
             .setCache(cache!!)
@@ -105,9 +168,6 @@ class PlaybackService : MediaSessionService() {
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
         }
 
-        // 6. Build ExoPlayer with CacheDataSource for progressive caching.
-        // URL resolution is handled eagerly in MusicRepository before items are set,
-        // not lazily in a MediaSource.Factory (which would block the main thread).
         val progressiveFactory = ProgressiveMediaSource.Factory(cacheDataSourceFactory!!)
 
         player = ExoPlayer.Builder(this, renderersFactory)
@@ -117,16 +177,42 @@ class PlaybackService : MediaSessionService() {
                 setAudioAttributes(audioAttributes, true)
                 playWhenReady = true
                 repeatMode = Player.REPEAT_MODE_ALL
+                addListener(object : Player.Listener {
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        if (isPlaying) {
+                            updateHeartIcon()
+                        }
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                    }
+                    
+                    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                        if (mediaItem != null) {
+                            updateHeartIcon()
+                        }
+                    }
+                })
             }
 
         mediaSession = player?.let { exoPlayer ->
+            val intent = Intent(this, MainActivity::class.java).apply {
+                putExtra("OPEN_FULL_PLAYER", true)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, intent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
             MediaSession.Builder(this, exoPlayer)
+                .setSessionActivity(pendingIntent)
                 .setCallback(object : MediaSession.Callback {
                     override fun onCustomCommand(
                         session: MediaSession,
                         controller: MediaSession.ControllerInfo,
                         customCommand: SessionCommand,
-                        args: android.os.Bundle
+                        args: Bundle
                     ): ListenableFuture<SessionResult> {
                         if (customCommand.customAction == ACTION_LIKE) {
                             val item = session.player.currentMediaItem
@@ -135,9 +221,8 @@ class PlaybackService : MediaSessionService() {
                                 val title = item.mediaMetadata.title?.toString() ?: ""
                                 val artist = item.mediaMetadata.artist?.toString() ?: ""
                                 val thumbnail = item.mediaMetadata.artworkUri?.toString() ?: ""
-                                // Fire and forget - like the song
+                                
                                 likeCallback?.invoke(videoId, title, artist, thumbnail)
-                                android.util.Log.d("SONARA_SERVICE", "Like action from notification: $title")
                             }
                             return com.google.common.util.concurrent.Futures.immediateFuture(
                                 SessionResult(SessionResult.RESULT_SUCCESS)
@@ -151,20 +236,13 @@ class PlaybackService : MediaSessionService() {
                         controller: MediaSession.ControllerInfo
                     ): MediaSession.ConnectionResult {
                         val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
-                            .add(SessionCommand(ACTION_LIKE, android.os.Bundle.EMPTY))
+                            .add(SessionCommand(ACTION_LIKE, Bundle.EMPTY))
                             .build()
                         return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                             .setAvailableSessionCommands(sessionCommands)
                             .build()
                     }
                 })
-                .setCustomLayout(listOf(
-                    CommandButton.Builder()
-                        .setDisplayName("Like")
-                        .setIconResId(android.R.drawable.btn_star_big_on)
-                        .setSessionCommand(SessionCommand(ACTION_LIKE, android.os.Bundle.EMPTY))
-                        .build()
-                ))
                 .build()
         }
     }
@@ -182,6 +260,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        instance = null
         mediaSession?.run {
             player.release()
             release()

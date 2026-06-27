@@ -109,9 +109,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
 
     fun toggleRepeatMode() = repository.setRepeatMode(
         when (repeatMode.value) {
-            RepeatMode.OFF -> RepeatMode.ALL
             RepeatMode.ALL -> RepeatMode.ONE
             RepeatMode.ONE -> RepeatMode.OFF
+            RepeatMode.OFF -> RepeatMode.ALL
         }
     )
 
@@ -292,9 +292,10 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
             val url = repository.fetchAudioStreamLink(videoId)
             if (url.isNotEmpty()) {
                 val safeTitle = title.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Track" }
+                val safeArtist = artist.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Artist" }
                 _downloadProgress.update { it + (videoId to 0) }
                 com.example.sonara.network.DownloadHelper.downloadWithStatus(
-                    context = context, url = url, title = title, artist = artist,
+                    context = context, url = url, videoId = videoId, title = title, artist = artist,
                     thumbnailUrl = thumbnailUrl,
                     onProgress = { progress ->
                         _downloadProgress.update { it + (videoId to progress) }
@@ -306,7 +307,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                                         title = title,
                                         artist = artist,
                                         thumbnailUrl = thumbnailUrl,
-                                        localFilePath = "Sonara/$safeTitle.m4a",
+                                        localFilePath = "Sonara/${safeTitle}_${safeArtist}_$videoId.m4a",
                                         userId = userId.value
                                     )
                                 )
@@ -334,9 +335,10 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                 val url = repository.fetchAudioStreamLink(song.videoId)
                 if (url.isNotEmpty()) {
                     val safeTitle = song.title.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Track" }
+                    val safeArtist = song.artist.filter { it.isLetterOrDigit() || it == ' ' }.ifEmpty { "Artist" }
                     _downloadProgress.update { it + (song.videoId to 0) }
                     com.example.sonara.network.DownloadHelper.downloadWithStatus(
-                        context = context, url = url, title = song.title, artist = song.artist,
+                        context = context, url = url, videoId = song.videoId, title = song.title, artist = song.artist,
                         thumbnailUrl = song.thumbnailUrl, showToasts = false,
                         onProgress = { progress ->
                             _downloadProgress.update { it + (song.videoId to progress) }
@@ -348,7 +350,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                                             title = song.title,
                                             artist = song.artist,
                                             thumbnailUrl = song.thumbnailUrl,
-                                            localFilePath = "Sonara/$safeTitle.m4a",
+                                            localFilePath = "Sonara/${safeTitle}_${safeArtist}_${song.videoId}.m4a",
                                             userId = userId.value
                                         )
                                     )
@@ -361,10 +363,10 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun deleteDownloadedSong(context: android.content.Context, videoId: String, title: String) {
+    fun deleteDownloadedSong(context: android.content.Context, videoId: String, title: String, artist: String) {
         viewModelScope.launch {
             repository.deleteDownloadedSong(videoId)
-            com.example.sonara.network.DownloadHelper.removeDownload(context, title)
+            com.example.sonara.network.DownloadHelper.removeDownload(context, videoId, title, artist)
             _downloadProgress.update { it - videoId }
         }
     }
@@ -375,7 +377,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
             
             // Remove DB entries whose files no longer exist
             dbSongs.forEach { song ->
-                if (!com.example.sonara.network.DownloadHelper.isFileDownloaded(song.title)) {
+                if (!com.example.sonara.network.DownloadHelper.isFileDownloaded(song.videoId, song.title, song.artist)) {
                     repository.deleteDownloadedSong(song.videoId)
                 }
             }
@@ -388,24 +390,52 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
             if (sonaraDir.exists() && sonaraDir.isDirectory) {
                 // Refresh DB list after cleanup
                 val currentDbSongs = repository.getAllDownloadedSongs().first()
-                val trackedFiles = currentDbSongs.map { song ->
-                    song.title.filter { c -> c.isLetterOrDigit() || c == ' ' }.lowercase()
-                }.toSet()
+                val trackedVideoIds = currentDbSongs.map { it.videoId }.toSet()
 
                 sonaraDir.listFiles()?.filter { it.extension == "m4a" }?.forEach { file ->
-                    val fileTitle = file.nameWithoutExtension.lowercase()
-                    // Only add if NOT already tracked (compare sanitized lowercase names)
-                    if (fileTitle !in trackedFiles) {
-                        repository.insertDownloadedSong(
-                            com.example.sonara.data.db.DownloadedSongEntity(
-                                videoId = "local_${file.name.hashCode()}",
-                                title = file.nameWithoutExtension,
-                                artist = "Unknown",
-                                thumbnailUrl = "",
-                                localFilePath = "Sonara/${file.name}",
-                                userId = userId.value
+                    // Filename format: Title_Artist_VideoID.m4a
+                    val nameWithoutExt = file.nameWithoutExtension
+                    val parts = nameWithoutExt.split("_")
+                    
+                    if (parts.size >= 3) {
+                        val videoId = parts.last()
+                        val artist = parts[parts.size - 2]
+                        val title = parts.subList(0, parts.size - 2).joinToString("_")
+
+                        if (videoId !in trackedVideoIds) {
+                            // Recover thumbnail if possible
+                            val recoveredThumb = repository.findThumbnailUrl(videoId)
+                            
+                            repository.insertDownloadedSong(
+                                com.example.sonara.data.db.DownloadedSongEntity(
+                                    videoId = videoId,
+                                    title = title,
+                                    artist = artist,
+                                    thumbnailUrl = recoveredThumb,
+                                    localFilePath = "Sonara/${file.name}",
+                                    userId = userId.value
+                                )
                             )
-                        )
+                        }
+                    } else {
+                        // Fallback for old files without the new naming convention
+                        val fileTitle = nameWithoutExt.lowercase()
+                        val trackedTitles = currentDbSongs.map { it.title.filter { c -> c.isLetterOrDigit() || c == ' ' }.lowercase() }.toSet()
+                        
+                        if (fileTitle !in trackedTitles) {
+                            // Try to recover thumbnail for old format too by searching by title (fuzzy)
+                            // But for now, just keep it blank as videoId is unknown
+                            repository.insertDownloadedSong(
+                                com.example.sonara.data.db.DownloadedSongEntity(
+                                    videoId = "local_${file.name.hashCode()}",
+                                    title = file.nameWithoutExtension,
+                                    artist = "Unknown",
+                                    thumbnailUrl = "",
+                                    localFilePath = "Sonara/${file.name}",
+                                    userId = userId.value
+                                )
+                            )
+                        }
                     }
                 }
             }

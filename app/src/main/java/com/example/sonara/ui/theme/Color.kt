@@ -12,7 +12,7 @@ val PurpleGrey40 = Color(0xFF625b71)
 val Pink40 = Color(0xFF7D5260)
 
 // --- SPOTIFY SIGNATURE PREMIUM PALETTE ---
-val SpotifyGreen = Color(0xFF1DB954)
+val SpotifyGreen = Color(0xFF1ED760)
 val SpotifyBlack = Color(0xFF121212)       // Primary application background
 val SpotifyDarkGray = Color(0xFF191414)    // Elevated surface/cards/bottom navigation
 val SpotifyLightGray = Color(0xFFB3B3B3)   // Secondary text/unselected icons

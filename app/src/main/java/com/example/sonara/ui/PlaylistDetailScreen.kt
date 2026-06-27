@@ -284,7 +284,7 @@ fun PlaylistDetailScreen(
                     onAddToQueue = { viewModel.addToQueue(song.videoId, song.title, song.artist, song.thumbnailUrl); selectedSongForMenu = null },
                     onGoToQueue = { showQueue = true; selectedSongForMenu = null },
                     onDownload = { viewModel.downloadSong(context, song.videoId, song.title, song.artist, song.thumbnailUrl); selectedSongForMenu = null },
-                    onRemoveDownload = { viewModel.deleteDownloadedSong(context, song.videoId, song.title); selectedSongForMenu = null }
+                    onRemoveDownload = { viewModel.deleteDownloadedSong(context, song.videoId, song.title, song.artist); selectedSongForMenu = null }
                 )
             }
         }

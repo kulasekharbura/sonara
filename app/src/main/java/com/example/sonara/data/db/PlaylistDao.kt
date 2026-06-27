@@ -40,4 +40,7 @@ interface PlaylistDao {
 
     @Query("SELECT COUNT(*) FROM playlist_songs WHERE playlistId = :playlistId AND videoId = :videoId")
     suspend fun songExistsInPlaylist(playlistId: Long, videoId: String): Int
+
+    @Query("SELECT * FROM playlist_songs INNER JOIN playlists ON playlist_songs.playlistId = playlists.id WHERE playlist_songs.videoId = :videoId AND playlists.userId = :userId LIMIT 1")
+    suspend fun getSongAcrossPlaylists(videoId: String, userId: String): PlaylistSongEntity?
 }
