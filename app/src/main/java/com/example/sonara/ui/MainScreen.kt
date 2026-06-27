@@ -105,7 +105,7 @@ fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false)
     val navigationStack = remember { mutableListOf<Screen>() } // actual history
     var isPlayerSheetVisible by remember { mutableStateOf(initialOpenPlayer) }
     var selectedSongForGlobalMenu by remember { mutableStateOf<SongDisplayItem?>(null) }
-    var showAddToPlaylistFor by remember { mutableStateOf<YoutubeSearchItem?>(null) }
+    var showAddToPlaylistFor by remember { mutableStateOf<SongDisplayItem?>(null) }
 
     val userIdValue by viewModel.userId.collectAsState()
     val isLoggedIn = userIdValue.isNotEmpty() && userIdValue != "anonymous"
@@ -119,6 +119,7 @@ fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false)
     }
 
     val isPlaying by viewModel.isPlaying.collectAsState()
+    val isLoading by viewModel.isLoading.collectAsState()
     val currentTrack by viewModel.currentMediaItem.collectAsState()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val startupContext = LocalContext.current
@@ -134,6 +135,7 @@ fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false)
                 if (currentTrack != null) {
                     MiniPlayerBar(
                         isPlaying = isPlaying,
+                        isLoading = isLoading,
                         trackTitle = currentTrack?.mediaMetadata?.title?.toString() ?: "No Track Playing",
                         trackArtist = currentTrack?.mediaMetadata?.artist?.toString() ?: "Sonara Stream Engine",
                         thumbnailUrl = currentTrack?.mediaMetadata?.artworkUri?.toString(),
@@ -223,6 +225,7 @@ fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false)
                 FullPlayerOverlay(
                     viewModel = viewModel,
                     isPlaying = isPlaying,
+                    isLoading = isLoading,
                     title = currentTrack?.mediaMetadata?.title?.toString() ?: "Unknown Title",
                     artist = currentTrack?.mediaMetadata?.artist?.toString() ?: "Unknown Artist",
                     thumbnailUrl = currentTrack?.mediaMetadata?.artworkUri?.toString(),
@@ -244,15 +247,9 @@ fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false)
         }
 
         if (showAddToPlaylistFor != null) {
-            val song = showAddToPlaylistFor!!
             AddToPlaylistSheet(
                 viewModel = viewModel,
-                song = SongDisplayItem(
-                    videoId = song.id.videoId ?: "",
-                    title = song.snippet.title,
-                    artist = song.snippet.channelTitle,
-                    thumbnailUrl = song.snippet.thumbnails.high.url
-                ),
+                song = showAddToPlaylistFor!!,
                 onDismiss = { showAddToPlaylistFor = null }
             )
         }
@@ -275,16 +272,11 @@ fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false)
                     downloadProgress = if (isDownloaded) 100 else progress,
                     onDismiss = { selectedSongForGlobalMenu = null },
                     onAddToPlaylist = { 
-                        showAddToPlaylistFor = YoutubeSearchItem(
-                            id = VideoIdId(song.videoId),
-                            snippet = SnippetData(
-                                title = song.title,
-                                channelTitle = song.artist,
-                                thumbnails = ThumbnailGroup(
-                                    default = ThumbDetails(song.thumbnailUrl),
-                                    high = ThumbDetails(song.thumbnailUrl)
-                                )
-                            )
+                        showAddToPlaylistFor = SongDisplayItem(
+                            videoId = song.videoId,
+                            title = song.title,
+                            artist = song.artist,
+                            thumbnailUrl = song.thumbnailUrl
                         )
                     },
                     onAddToQueue = { viewModel.addToQueue(song.videoId, song.title, song.artist, song.thumbnailUrl); selectedSongForGlobalMenu = null },
@@ -299,7 +291,7 @@ fun MainScreen(viewModel: PlaybackViewModel, initialOpenPlayer: Boolean = false)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchTabContent(viewModel: PlaybackViewModel, onAddToPlaylist: (YoutubeSearchItem) -> Unit) {
+fun SearchTabContent(viewModel: PlaybackViewModel, onAddToPlaylist: (SongDisplayItem) -> Unit) {
     var searchQuery by remember { mutableStateOf("") }
     val searchResults by viewModel.searchResults.collectAsState()
     val searchPlaylists by viewModel.searchPlaylists.collectAsState()
@@ -437,7 +429,12 @@ fun SearchTabContent(viewModel: PlaybackViewModel, onAddToPlaylist: (YoutubeSear
                             )
 
                             IconButton(onClick = {
-                                viewModel.addToQueue(trackItem)
+                                viewModel.addToQueue(
+                                    videoId = videoId,
+                                    title = trackItem.snippet.title,
+                                    artist = trackItem.snippet.channelTitle,
+                                    thumbnailUrl = trackItem.snippet.thumbnails.high.url
+                                )
                                 Toast.makeText(context, "Added to queue", Toast.LENGTH_SHORT).show()
                             }) {
                                 Icon(
@@ -448,7 +445,16 @@ fun SearchTabContent(viewModel: PlaybackViewModel, onAddToPlaylist: (YoutubeSear
                                 )
                             }
 
-                            IconButton(onClick = { onAddToPlaylist(trackItem) }) {
+                            IconButton(onClick = { 
+                                onAddToPlaylist(
+                                    SongDisplayItem(
+                                        videoId = videoId,
+                                        title = trackItem.snippet.title,
+                                        artist = trackItem.snippet.channelTitle,
+                                        thumbnailUrl = trackItem.snippet.thumbnails.high.url
+                                    )
+                                ) 
+                            }) {
                                 Icon(
                                     Icons.AutoMirrored.Filled.PlaylistAdd,
                                     contentDescription = "Add to Playlist",
@@ -596,6 +602,7 @@ fun AddToPlaylistSheet(
 @Composable
 fun MiniPlayerBar(
     isPlaying: Boolean,
+    isLoading: Boolean = false,
     trackTitle: String,
     trackArtist: String,
     thumbnailUrl: String?,
@@ -618,15 +625,24 @@ fun MiniPlayerBar(
             modifier = Modifier.weight(1f).padding(start = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(
-                model = thumbnailUrl ?: "https://storage.googleapis.com/exoplayer-test-media-0/art/placeholder.jpg",
-                contentDescription = "Mini Art",
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color.Gray),
-                contentScale = ContentScale.Crop
-            )
+            Box(contentAlignment = Alignment.Center) {
+                AsyncImage(
+                    model = thumbnailUrl ?: "https://storage.googleapis.com/exoplayer-test-media-0/art/placeholder.jpg",
+                    contentDescription = "Mini Art",
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.Gray),
+                    contentScale = ContentScale.Crop
+                )
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        color = SpotifyGreen,
+                        strokeWidth = 2.dp
+                    )
+                }
+            }
             Column(modifier = Modifier.padding(start = 12.dp)) {
                 Text(text = trackTitle, style = MaterialTheme.typography.bodyMedium, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(text = trackArtist, style = MaterialTheme.typography.bodySmall, color = SpotifyLightGray, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -634,11 +650,11 @@ fun MiniPlayerBar(
         }
 
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onPlayPauseToggle) {
+            IconButton(onClick = onPlayPauseToggle, enabled = !isLoading) {
                 Icon(
                     imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     contentDescription = "Play/Pause",
-                    tint = Color.White,
+                    tint = if (isLoading) Color.Gray else Color.White,
                     modifier = Modifier.size(28.dp)
                 )
             }
@@ -658,6 +674,7 @@ fun MiniPlayerBar(
 fun FullPlayerOverlay(
     viewModel: PlaybackViewModel,
     isPlaying: Boolean,
+    isLoading: Boolean = false,
     title: String,
     artist: String,
     thumbnailUrl: String?,
@@ -712,16 +729,25 @@ fun FullPlayerOverlay(
             }
         }
 
-        AsyncImage(
-            model = thumbnailUrl,
-            contentDescription = "Big Album Art",
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color.DarkGray),
-            contentScale = ContentScale.Crop
-        )
+        Box(contentAlignment = Alignment.Center) {
+            AsyncImage(
+                model = thumbnailUrl,
+                contentDescription = "Big Album Art",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.DarkGray),
+                contentScale = ContentScale.Crop
+            )
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(64.dp),
+                    color = SpotifyGreen,
+                    strokeWidth = 4.dp
+                )
+            }
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 24.dp),

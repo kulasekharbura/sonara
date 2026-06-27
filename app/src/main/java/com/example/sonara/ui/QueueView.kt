@@ -88,7 +88,7 @@ fun QueueView(
             state = rememberLazyListState(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            itemsIndexed(localItems, key = { _, track -> track.videoId }) { index, track ->
+            itemsIndexed(localItems, key = { _, track -> track.queueId }) { index, track ->
                 val isPlaying = index == currentIndex
                 val isDragging = draggedItemIndex == index
 

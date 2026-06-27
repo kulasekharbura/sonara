@@ -29,6 +29,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     val userId: StateFlow<String> = _userId.asStateFlow()
 
     val isPlaying: StateFlow<Boolean> = repository.isPlaying
+    val isLoading: StateFlow<Boolean> = repository.isLoading
     val currentMediaItem: StateFlow<MediaItem?> = repository.currentMediaItem
     val currentPosition: StateFlow<Long> = repository.currentPosition
     val duration: StateFlow<Long> = repository.duration
@@ -92,6 +93,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
 
     fun playQueueFromSearch(results: List<YoutubeSearchItem>, startIndex: Int) {
         val mediaItems = results.map { item ->
+            val extras = android.os.Bundle().apply {
+                putString("queue_id", java.util.UUID.randomUUID().toString())
+            }
             MediaItem.Builder()
                 .setMediaId(item.id.videoId ?: "")
                 .setUri("sonara://resolve/${item.id.videoId ?: ""}")
@@ -100,6 +104,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                         .setTitle(item.snippet.title)
                         .setArtist(item.snippet.channelTitle)
                         .setArtworkUri(item.snippet.thumbnails.high.url.toUri())
+                        .setExtras(extras)
                         .build()
                 )
                 .build()
@@ -118,6 +123,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     fun toggleShuffle() = repository.setShuffleEnabled(!shuffleEnabled.value)
 
     fun addToQueue(item: YoutubeSearchItem) {
+        val extras = android.os.Bundle().apply {
+            putString("queue_id", java.util.UUID.randomUUID().toString())
+        }
         val mediaItem = MediaItem.Builder()
             .setMediaId(item.id.videoId ?: "")
             .setUri("sonara://resolve/${item.id.videoId ?: ""}")
@@ -126,6 +134,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                     .setTitle(item.snippet.title)
                     .setArtist(item.snippet.channelTitle)
                     .setArtworkUri(item.snippet.thumbnails.high.url.toUri())
+                    .setExtras(extras)
                     .build()
             )
             .build()
@@ -133,6 +142,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun addToQueue(videoId: String, title: String, artist: String, thumbnailUrl: String) {
+        val extras = android.os.Bundle().apply {
+            putString("queue_id", java.util.UUID.randomUUID().toString())
+        }
         val mediaItem = MediaItem.Builder()
             .setMediaId(videoId)
             .setUri("sonara://resolve/$videoId")
@@ -141,6 +153,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                     .setTitle(title)
                     .setArtist(artist)
                     .setArtworkUri(thumbnailUrl.toUri())
+                    .setExtras(extras)
                     .build()
             )
             .build()
@@ -448,6 +461,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val liked = repository.getLikedSongs().first()
             val mediaItems = liked.map { song ->
+                val extras = android.os.Bundle().apply {
+                    putString("queue_id", java.util.UUID.randomUUID().toString())
+                }
                 MediaItem.Builder()
                     .setMediaId(song.videoId)
                     .setUri("sonara://resolve/${song.videoId}")
@@ -456,6 +472,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                             .setTitle(song.title)
                             .setArtist(song.artist)
                             .setArtworkUri(song.thumbnailUrl.toUri())
+                            .setExtras(extras)
                             .build()
                     )
                     .build()
@@ -468,6 +485,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val songs = repository.getPlaylistSongs(playlistId).first()
             val mediaItems = songs.map { song ->
+                val extras = android.os.Bundle().apply {
+                    putString("queue_id", java.util.UUID.randomUUID().toString())
+                }
                 MediaItem.Builder()
                     .setMediaId(song.videoId)
                     .setUri("sonara://resolve/${song.videoId}")
@@ -476,6 +496,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                             .setTitle(song.title)
                             .setArtist(song.artist)
                             .setArtworkUri(song.thumbnailUrl.toUri())
+                            .setExtras(extras)
                             .build()
                     )
                     .build()
@@ -488,6 +509,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val recent = repository.getRecentSongs().first()
             val mediaItems = recent.map { song ->
+                val extras = android.os.Bundle().apply {
+                    putString("queue_id", java.util.UUID.randomUUID().toString())
+                }
                 MediaItem.Builder()
                     .setMediaId(song.videoId)
                     .setUri("sonara://resolve/${song.videoId}")
@@ -496,6 +520,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                             .setTitle(song.title)
                             .setArtist(song.artist)
                             .setArtworkUri(song.thumbnailUrl.toUri())
+                            .setExtras(extras)
                             .build()
                     )
                     .build()
@@ -519,6 +544,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                     // Fallback to stream if file is missing
                     "sonara://resolve/${song.videoId}"
                 }
+                val extras = android.os.Bundle().apply {
+                    putString("queue_id", java.util.UUID.randomUUID().toString())
+                }
                 MediaItem.Builder()
                     .setMediaId(song.videoId)
                     .setUri(uri)
@@ -527,6 +555,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                             .setTitle(song.title)
                             .setArtist(song.artist)
                             .setArtworkUri(song.thumbnailUrl.toUri())
+                            .setExtras(extras)
                             .build()
                     )
                     .build()

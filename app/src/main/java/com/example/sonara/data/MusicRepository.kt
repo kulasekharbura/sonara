@@ -68,6 +68,9 @@ class MusicRepository(private val context: Context) {
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
 
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
@@ -159,20 +162,35 @@ class MusicRepository(private val context: Context) {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 _currentMediaItem.value = mediaItem
                 _currentQueueIndex.value = mediaController?.currentMediaItemIndex ?: 0
-                // Record to recent history
-                mediaItem?.let { item ->
-                    val metadata = item.mediaMetadata
-                    repositoryScope.launch {
-                        recordRecentPlay(
-                            videoId = item.mediaId,
-                            title = metadata.title?.toString() ?: "",
-                            artist = metadata.artist?.toString() ?: "",
-                            thumbnailUrl = metadata.artworkUri?.toString() ?: ""
-                        )
+
+                val uri = mediaItem?.localConfiguration?.uri
+                if (uri != null && uri.scheme == "sonara") {
+                    // Immediate Resolution Guard: If we landed on a placeholder, resolve it now.
+                    android.util.Log.d("SONARA_JIT", "Landed on placeholder, triggering immediate resolution: ${mediaItem.mediaId}")
+                    resolveCurrentItem(mediaItem)
+                } else {
+                    _isLoading.value = false
+                    // If this transition is due to a repeat, skip heavy logic (history recording, preloading)
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+                        android.util.Log.d("SONARA_PLAYBACK", "Media item repeated, skipping transition logic")
+                        return
                     }
+
+                    // Record to recent history
+                    mediaItem?.let { item ->
+                        val metadata = item.mediaMetadata
+                        repositoryScope.launch {
+                            recordRecentPlay(
+                                videoId = item.mediaId,
+                                title = metadata.title?.toString() ?: "",
+                                artist = metadata.artist?.toString() ?: "",
+                                thumbnailUrl = metadata.artworkUri?.toString() ?: ""
+                            )
+                        }
+                    }
+                    // Preload next track's URL so it's ready when this track ends
+                    preloadNextTrack()
                 }
-                // Preload next track's URL so it's ready when this track ends
-                preloadNextTrack()
             }
 
             override fun onTimelineChanged(timeline: Timeline, reason: Int) {
@@ -202,7 +220,12 @@ class MusicRepository(private val context: Context) {
                     "Playback error at index $currentIndex: ${error.message}"
                 )
 
-                if (currentIndex < itemCount - 1) {
+                if (controller.repeatMode == Player.REPEAT_MODE_ONE) {
+                    android.util.Log.d("SONARA_PLAYBACK", "Retrying current track due to REPEAT_MODE_ONE")
+                    controller.seekTo(0)
+                    controller.prepare()
+                    controller.play()
+                } else if (currentIndex < itemCount - 1) {
                     android.util.Log.d("SONARA_PLAYBACK", "Skipping to next track after error")
                     controller.seekToNext()
                     controller.prepare()
@@ -218,14 +241,13 @@ class MusicRepository(private val context: Context) {
         _currentMediaItem.value = mediaController?.currentMediaItem
         _currentQueueIndex.value = mediaController?.currentMediaItemIndex ?: 0
         
-        // Ensure initial repeat mode is set and synced
-        val initialMode = mediaController?.repeatMode ?: Player.REPEAT_MODE_ALL
-        mediaController?.repeatMode = initialMode
-        _repeatMode.value = when (initialMode) {
-            Player.REPEAT_MODE_ALL -> RepeatMode.ALL
-            Player.REPEAT_MODE_ONE -> RepeatMode.ONE
-            else -> RepeatMode.OFF
+        // Ensure initial repeat mode is synced with the repository's preference
+        val playerMode = when (_repeatMode.value) {
+            RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+            RepeatMode.ONE -> Player.REPEAT_MODE_ONE
+            RepeatMode.OFF -> Player.REPEAT_MODE_OFF
         }
+        mediaController?.repeatMode = playerMode
 
         rebuildQueueItems()
     }
@@ -235,22 +257,70 @@ class MusicRepository(private val context: Context) {
         val count = controller.mediaItemCount
         val items = mutableListOf<QueueTrack>()
         for (i in 0 until count) {
-            val mediaItem = controller.getMediaItemAt(i)
-            val metadata = mediaItem.mediaMetadata
-            items.add(
-                QueueTrack(
-                    videoId = mediaItem.mediaId,
-                    title = metadata.title?.toString() ?: "",
-                    artist = metadata.artist?.toString() ?: "",
-                    thumbnailUrl = metadata.artworkUri?.toString() ?: ""
+            try {
+                val mediaItem = controller.getMediaItemAt(i)
+                val metadata = mediaItem.mediaMetadata
+                val queueId = metadata.extras?.getString("queue_id") ?: java.util.UUID.randomUUID().toString()
+                items.add(
+                    QueueTrack(
+                        queueId = queueId,
+                        videoId = mediaItem.mediaId,
+                        title = metadata.title?.toString() ?: "",
+                        artist = metadata.artist?.toString() ?: "",
+                        thumbnailUrl = metadata.artworkUri?.toString() ?: ""
+                    )
                 )
-            )
+            } catch (e: Exception) {
+                android.util.Log.e("SONARA_QUEUE", "Error rebuilding queue at index $i: ${e.message}")
+            }
         }
         _queueItems.value = items
     }
 
+    private fun resolveCurrentItem(mediaItem: MediaItem) {
+        val controller = mediaController ?: return
+        val videoId = mediaItem.mediaId
+        if (videoId.isEmpty()) return
+
+        _isLoading.value = true
+        repositoryScope.launch {
+            val resolvedUrl = fetchAudioStreamLink(videoId)
+            withContext(Dispatchers.Main) {
+                if (resolvedUrl.isNotEmpty()) {
+                    val resolved = mediaItem.buildUpon().setUri(resolvedUrl).build()
+                    val currentIndex = controller.currentMediaItemIndex
+                    // Verify we are still on the same item before replacing
+                    try {
+                        if (currentIndex < controller.mediaItemCount &&
+                            controller.getMediaItemAt(currentIndex).mediaId == videoId) {
+                            controller.replaceMediaItem(currentIndex, resolved)
+                            controller.prepare()
+                            controller.play()
+                            android.util.Log.d("SONARA_JIT", "Successfully resolved current track in foreground: $videoId")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SONARA_JIT", "Failed to replace current media item: ${e.message}")
+                    }
+                }
+                _isLoading.value = false
+            }
+        }
+    }
+
     private fun preloadNextTrack() {
         val controller = mediaController ?: return
+        
+        // If Repeat One is active, the next item to play is the current item itself.
+        // If it's already resolved (no longer has sonara:// scheme), we don't need to preload/replace anything.
+        if (controller.repeatMode == Player.REPEAT_MODE_ONE) {
+            val currentItem = controller.currentMediaItem ?: return
+            val currentUri = currentItem.localConfiguration?.uri
+            if (currentUri != null && currentUri.scheme != "sonara" && currentUri.toString().isNotEmpty()) {
+                android.util.Log.d("SONARA_JIT", "Repeat One active and current track already resolved, skipping preload.")
+                return
+            }
+        }
+
         val nextIndex = controller.nextMediaItemIndex
         if (nextIndex == C.INDEX_UNSET) return
 
@@ -352,9 +422,13 @@ class MusicRepository(private val context: Context) {
     fun removeFromQueue(videoId: String) {
         mediaController?.let { controller ->
             for (i in 0 until controller.mediaItemCount) {
-                if (controller.getMediaItemAt(i).mediaId == videoId) {
-                    controller.removeMediaItem(i)
-                    break
+                try {
+                    if (i < controller.mediaItemCount && controller.getMediaItemAt(i).mediaId == videoId) {
+                        controller.removeMediaItem(i)
+                        break
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SONARA_QUEUE", "Error removing item at index $i: ${e.message}")
                 }
             }
         }
@@ -438,11 +512,21 @@ class MusicRepository(private val context: Context) {
     }
 
     fun skipToNext() {
-        mediaController?.seekToNext()
+        val controller = mediaController ?: return
+        if (controller.repeatMode == Player.REPEAT_MODE_ONE) {
+            controller.seekTo(0)
+        } else {
+            controller.seekToNext()
+        }
     }
 
     fun skipToPrevious() {
-        mediaController?.seekToPrevious()
+        val controller = mediaController ?: return
+        if (controller.repeatMode == Player.REPEAT_MODE_ONE) {
+            controller.seekTo(0)
+        } else {
+            controller.seekToPrevious()
+        }
     }
 
     fun setRepeatMode(mode: RepeatMode) {
@@ -500,6 +584,9 @@ class MusicRepository(private val context: Context) {
             val controller = mediaController
 
             if (controller != null && resolvedStreamUrl.isNotEmpty()) {
+                val extras = android.os.Bundle().apply {
+                    putString("queue_id", java.util.UUID.randomUUID().toString())
+                }
                 val mediaItem = MediaItem.Builder()
                     .setMediaId(videoId)
                     .setUri(resolvedStreamUrl)
@@ -508,6 +595,7 @@ class MusicRepository(private val context: Context) {
                             .setTitle(title)
                             .setArtist(artist)
                             .setArtworkUri(thumbnailUrl.toUri())
+                            .setExtras(extras)
                             .build()
                     )
                     .build()
